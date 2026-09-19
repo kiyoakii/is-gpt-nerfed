@@ -43,6 +43,8 @@ struct SettingsView: View {
                 row(L10n.tr("Halt the session after a mismatch")) { toggle("halt_on_mismatch", cfg?.haltOnMismatch ?? false) }
                 RowSeparator()
                 row(L10n.tr("Scan rollouts on every turn")) { toggle("passive", cfg?.passive ?? true) }
+                RowSeparator()
+                row(L10n.tr("Also ask the server which model answered")) { toggle("served_check", cfg?.servedCheck ?? true) }
             }
             Group(title: L10n.tr("Alerts")) {
                 row(L10n.tr("Notifications")) { toggle("notify", cfg?.notify ?? true) }

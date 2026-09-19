@@ -103,6 +103,7 @@ struct DGCConfig: Codable {
     var hideTitles: Bool?
     var freshFrequency: String?
     var checkUpdates: Bool?
+    var servedCheck: Bool?
 }
 
 struct ThreadInfo: Codable, Identifiable {
@@ -184,6 +185,10 @@ struct ProbeSummary: Codable, Identifiable {
     var retryable: Bool?
     var retries: Int?
     var results: [Attribution]?
+    var serverModel: String?      // the model the server named for this probe's model (served_check); nil when it did not run
+    var serverState: String?      // same | downgrade | upgrade | lateral | unrecognized | failed
+    var serverRequested: String?
+    var serverError: String?
     var started: String?
 
     static func pct(_ p: Double?) -> String {

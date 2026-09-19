@@ -27,6 +27,7 @@ loader = importlib.machinery.SourceFileLoader("dgc", DGC_PATH)
 spec = importlib.util.spec_from_loader("dgc", loader)
 dgc = importlib.util.module_from_spec(spec)
 loader.exec_module(dgc)
+dgc.responses_meta.RESPONSES_URL = "http://127.0.0.1:9/no-network-in-tests"  # the server check never reaches chatgpt.com here
 
 
 def rollout_lines(*records):
@@ -830,6 +831,205 @@ class SnapshotReportTests(unittest.TestCase):
         self.assertEqual(snap["last_verdict"]["id"], "a1b2c3d4e5")
         self.assertFalse(dgc.probe_row_valid({"status": "failed", "verdict": "INVALID"}))
         self.assertTrue(dgc.probe_row_valid({"status": "done", "verdict": "MATCH"}))
+
+
+class ServedModelTests(unittest.TestCase):
+    """The server check: one small request per probe, weighed next to the fingerprint, never instead of it."""
+
+    class SSEHandler(__import__("http.server", fromlist=["BaseHTTPRequestHandler"]).BaseHTTPRequestHandler):
+        served_model = "gpt-6-astra"
+        header_model = None
+        redirect_to = None
+        seen = []
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            cls = type(self)
+            cls.seen.append(("POST", self.path, {k.lower(): v for k, v in self.headers.items()}, json.loads(body or b"{}")))
+            if cls.redirect_to:
+                self.send_response(302)
+                self.send_header("Location", cls.redirect_to)
+                self.end_headers()
+                return
+            if not (self.headers.get("Authorization") or "").startswith("Bearer "):
+                self.send_response(401)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            if cls.header_model:
+                self.send_header("OpenAI-Model", cls.header_model)
+            self.end_headers()
+            ev = {"type": "response.created", "response": {"id": "r1", "model": cls.served_model}}
+            self.wfile.write(f"event: response.created\ndata: {json.dumps(ev)}\n\n".encode())
+            self.wfile.flush()
+
+        def do_GET(self):  # where a redirect would lead: it must never be reached
+            type(self).seen.append(("GET", self.path, {k.lower(): v for k, v in self.headers.items()}, None))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    @staticmethod
+    def jwt(exp_offset_s):
+        import base64
+
+        def b(d):
+            return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+        return f"{b({'alg': 'none'})}.{b({'exp': time.time() + exp_offset_s})}.sig"
+
+    def write_auth(self, **tokens):
+        with open(self.auth_path, "w") as f:
+            json.dump({"tokens": {"access_token": self.jwt(3600), **tokens}}, f)
+
+    def setUp(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+        self.auth_path = os.path.join(os.environ["CODEX_HOME"], "auth.json")
+        self.write_auth()  # no account id: the records stay under the tests' "local" account
+        H = self.SSEHandler
+        H.served_model, H.header_model, H.redirect_to, H.seen = "gpt-6-astra", None, None, []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/responses"
+        self.patcher = mock.patch.object(dgc.responses_meta, "RESPONSES_URL", self.url)
+        self.patcher.start()
+        dgc.ensure_dirs()
+        dgc.save_config({**dgc.DEFAULT_CONFIG, "codex_bin": FAKE_CODEX, "notify": False, "sound": False,
+                         "probe_timeout_s": 30, "served_check_timeout_s": 5})
+        dgc._BANK = None
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.server.shutdown()
+        self.server.server_close()
+        if os.path.exists(self.auth_path):
+            os.remove(self.auth_path)
+
+    def fresh(self, model="gpt-6-astra", answers="gpt-6-astra", **env):
+        rc, out = run_cli(["probe", "fresh", "--model", model], {"FAKE_CODEX_MODEL": answers, **env})
+        self.assertEqual(rc, 0, out)
+        pid = re.search(r"probe ([0-9a-f]{10})", out).group(1)
+        return out, dgc.read_json(dgc.probe_path(pid))
+
+    def test_the_fingerprint_runs_when_the_server_agrees(self):
+        out, rec = self.fresh()
+        self.assertIn("verdict: MATCH", out)
+        self.assertEqual(len(rec["forks"]), 3, "the server's word never replaces the fingerprint")
+        self.assertEqual(rec["server"]["state"], "same")
+        self.assertIn("server says gpt-6-astra (as asked)", out)
+        self.assertEqual(rec["served"]["requested"], "gpt-6-astra")
+
+    def test_the_server_agreeing_cannot_clear_a_fingerprint_mismatch(self):
+        out, rec = self.fresh(answers="gpt-5.6-luna")  # the label says astra, the answers look like luna
+        self.assertEqual((rec["verdict"], rec["direction"]), ("MISMATCH", "downgrade"))
+        self.assertEqual(rec["server"]["state"], "same")
+
+    def test_both_layers_agree_on_a_downgrade(self):
+        self.SSEHandler.served_model = "gpt-5.6-luna"
+        out, rec = self.fresh(answers="gpt-5.6-luna")
+        self.assertEqual((rec["verdict"], rec["direction"]), ("MISMATCH", "downgrade"))
+        self.assertEqual(rec["server"]["state"], "downgrade")
+        self.assertIn("server says gpt-5.6-luna for gpt-6-astra (downgrade", out)
+
+    def test_a_server_contradicting_a_match_makes_it_suspicious(self):
+        self.SSEHandler.served_model = "gpt-5.6-luna"
+        out, rec = self.fresh()  # the answers look like astra
+        self.assertEqual((rec["verdict"], rec["direction"], rec["status"]), ("SUSPICIOUS", "server", "done"))
+        self.assertIn("the server's own response says gpt-5.6-luna answered your gpt-6-astra request", rec["quote"])
+        self.assertTrue(dgc.probe_row_valid(rec), "the panel shows it as a verdict, not as a failed attempt")
+        snap = json.loads(run_cli(["snapshot", "--json"])[1])
+        g = snap["global_probe"]
+        self.assertEqual((g["id"], g["verdict"], g["server_model"], g["server_state"]), (rec["id"], "SUSPICIOUS", "gpt-5.6-luna", "downgrade"))
+        self.assertIn("Server · gpt-5.6-luna, asked for gpt-6-astra", snap["global_report_text"])
+        out, rec = self.fresh(answers="gpt-5.6-luna")  # the fingerprint made this verdict: its numbers lead
+        line = dgc.probe_line(json.loads(run_cli(["snapshot", "--json"])[1])["global_probe"])
+        self.assertTrue(line.startswith("Downgrade · gpt-5.6-luna 100%, declared 0% · server: gpt-5.6-luna"), line)
+        self.assertTrue(dgc.probe_line(g).startswith("Suspicious · server: gpt-5.6-luna · gpt-6-astra 100%"), dgc.probe_line(g))
+
+    def test_the_server_decides_when_the_forks_give_no_answer(self):
+        self.SSEHandler.served_model = "gpt-5.6-luna"
+        out, rec = self.fresh(FAKE_CODEX_FAIL="1")
+        self.assertEqual((rec["verdict"], rec["direction"], rec["status"]), ("DOWNGRADED!", "server", "done"))
+        self.assertIn("the server's own response says gpt-5.6-luna answered", rec["quote"])
+        snap = json.loads(run_cli(["snapshot", "--json"])[1])
+        self.assertEqual(snap["global_probe"]["id"], rec["id"])
+        self.assertTrue(snap["global_alert"], "a downgrade the server admits is an alert in the panel too")
+        self.assertIn("Downgraded · server: gpt-5.6-luna", dgc.probe_line(snap["global_probe"]))
+
+    def test_a_dated_snapshot_name_is_the_model_asked_for(self):
+        self.SSEHandler.served_model = "gpt-6-astra-2026-08-20"
+        out, rec = self.fresh()
+        self.assertEqual((rec["verdict"], rec["server"]["state"]), ("MATCH", "same"))
+
+    def test_unknown_names_and_upgrades_change_nothing(self):
+        self.SSEHandler.served_model = "gpt-6-astra-internal-x"
+        out, rec = self.fresh()
+        self.assertEqual((rec["verdict"], rec["server"]["state"]), ("MATCH", "unrecognized"))
+        self.SSEHandler.served_model = "gpt-6-astra"
+        out, rec = self.fresh(model="gpt-5.6-sol", answers="gpt-5.6-sol")
+        self.assertEqual((rec["verdict"], rec["server"]["state"]), ("MATCH", "upgrade"))
+
+    def test_the_header_codex_reads_wins_over_the_body(self):
+        self.SSEHandler.header_model = "gpt-5.6-luna"
+        r = dgc.responses_meta.check_served_model("gpt-6-astra", os.environ["CODEX_HOME"])
+        self.assertEqual((r["served"], r["header_model"], r["body_model"]), ("gpt-5.6-luna", "gpt-5.6-luna", "gpt-6-astra"))
+
+    def test_the_request_is_the_probe_model_and_says_who_sends_it(self):
+        self.write_auth(account_id="acct-123")
+        r = dgc.responses_meta.check_served_model("gpt-6-astra", os.environ["CODEX_HOME"], effort="xhigh",
+                                                  originator="Codex Desktop", client_version="9.9.9")
+        self.assertTrue(r["ok"], r)
+        method, path, headers, body = self.SSEHandler.seen[-1]
+        self.assertEqual((body["model"], body["reasoning"], body["store"]), ("gpt-6-astra", {"effort": "xhigh"}, False))
+        self.assertEqual(headers["chatgpt-account-id"], "acct-123")
+        self.assertEqual(headers["originator"], "Codex Desktop")
+        self.assertEqual(headers["user-agent"], "is-gpt-nerfed/9.9.9")
+
+    def test_a_redirect_is_refused_and_the_token_goes_nowhere_else(self):
+        self.SSEHandler.redirect_to = self.url.replace("/responses", "/elsewhere")
+        r = dgc.responses_meta.check_served_model("gpt-6-astra", os.environ["CODEX_HOME"])
+        self.assertFalse(r["ok"])
+        self.assertIn("HTTP 302", r["error"])
+        self.assertEqual([m for m, *_ in self.SSEHandler.seen], ["POST"], "the redirect target was never contacted")
+        with open(dgc.responses_meta.__file__, encoding="utf-8") as f:
+            self.assertNotIn("os.environ", f.read(), "no environment override for the token's destination")
+
+    def test_a_failed_check_changes_nothing(self):
+        with mock.patch.object(dgc.responses_meta, "RESPONSES_URL", "http://127.0.0.1:9/none"):
+            out, rec = self.fresh()
+        self.assertEqual((rec["verdict"], rec["server"]["state"]), ("MATCH", "failed"))
+        self.assertIn("server check: no answer", out)
+
+    def test_an_expired_token_is_never_sent(self):
+        with open(self.auth_path, "w") as f:
+            json.dump({"tokens": {"access_token": self.jwt(-3600)}}, f)
+        self.assertEqual(dgc.responses_meta.read_auth(os.environ["CODEX_HOME"]), (None, None))
+        out, rec = self.fresh()
+        self.assertEqual(self.SSEHandler.seen, [], "no request without a valid token")
+        self.assertEqual((rec["verdict"], rec["server"]["state"]), ("MATCH", "failed"))
+
+    def test_switching_it_off_means_no_request(self):
+        rc, out = run_cli(["config", "set", "served_check", "false"])
+        self.assertIs(dgc.load_config()["served_check"], False, "stored as a boolean, not the truthy string 'false'")
+        out, rec = self.fresh()
+        self.assertEqual(self.SSEHandler.seen, [])
+        self.assertNotIn("served", rec)
+        self.assertNotIn("server", rec)
+
+    def test_served_command(self):
+        rc, out = run_cli(["served", "--model", "gpt-6-astra"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("server says: gpt-6-astra  (the model asked for)", out)
+        self.SSEHandler.served_model = "gpt-5.6-luna"
+        rc, out = run_cli(["served", "--model", "gpt-6-astra"])
+        self.assertEqual(rc, 2, out)
+        self.assertIn("server says: gpt-5.6-luna  (a downgrade", out)
+        os.remove(self.auth_path)
+        rc, out = run_cli(["served", "--model", "gpt-6-astra"])
+        self.assertEqual(rc, 1, out)
 
 
 if __name__ == "__main__":

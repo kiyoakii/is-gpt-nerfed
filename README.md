@@ -22,7 +22,8 @@ You pick a model in Codex. This tells you whether that model is actually the one
 
 ## What it checks
 
-Everything runs on your Mac. Nothing is uploaded.
+The analysis runs on your Mac and your records stay there. Two of the three checks below cost nothing; the third
+asks Codex for answers through your own account.
 
 Codex records, for every turn, which model and reasoning effort it asked for. The plugin reads those records after
 each turn and flags what changed without you changing it: a model swap, a lower reasoning effort, a hidden internal
@@ -34,14 +35,21 @@ desktop uses for a side chat, with the session's own model and reasoning effort.
 "random" numbers. A language model picks random numbers with a bias that is characteristic of the
 model. [ModelTrace](https://github.com/xqy2006/ModelTrace)'s calibrated bank turns the three answers into a
 fingerprint (100 % accuracy with three answers in cross-validation), and the verdict compares that fingerprint with
-the model you selected:
+the model you selected.
+
+Each probe also asks the server itself. One small request for the same model and reasoning effort goes to Codex's
+backend, and the server names a model in its answer, either in a response header that Codex itself checks or in the
+first event of the stream. The connection closes there. That name is a label, so it is weighed next to the
+fingerprint rather than instead of it: when the server names another model it is taken seriously, and when it names
+the model you asked for it proves nothing, because a swap that keeps the name is exactly what the fingerprint is
+for. `nerfed served` runs the check on its own, and `served_check` switches it off.
 
 | verdict | meaning |
 | --- | --- |
 | Match | the model you selected answered |
-| Suspicious | the fingerprint leans elsewhere, but not confidently; it stands until the next probe |
+| Suspicious | the fingerprint leans elsewhere but not confidently, or it matches while the server names another model |
 | Downgrade / Upgrade / Rerouted | a confident mismatch: top candidate at 80 % or more, your model at 20 % or less, at least two answers |
-| Downgraded | Codex's own records show a silent switch; no fingerprint needed |
+| Downgraded | Codex's own records show a silent switch, or the server named a lesser model and the fingerprint could not settle it |
 | Upgraded | Codex's own records show a move to a newer or larger model |
 | Unlisted | your model is not in the fingerprint bank yet |
 | Invalid | no usable answer (tool use, refusal, network); not a verdict, the row keeps its last one and offers Retry |
@@ -99,6 +107,7 @@ Settings are in the app, or `nerfed config set <key> <value>`:
 | --- | --- | --- |
 | `frequency` | `30m` | per session: every N minutes of activity (`30m`) or every N turns (`turns:8`) |
 | `fresh_frequency` | `manual` | probe a brand-new session every N minutes, whatever you are doing |
+| `served_check` | `true` | also ask the server which model it says answered, once per probe |
 | `mode` | `auto` | `auto` probes in the background, `nudge` only reminds you |
 | `halt_on_mismatch` | `false` | block tools after a mismatch until you say resume |
 | `notify_on_ok`, `announce_ok` | `false` | also report Match |
@@ -113,11 +122,15 @@ verdicts show as "another account" and those sessions are probed again.
 
 ## Limits
 
-- "The model you selected" is the model Codex asked for. If the server swaps the weights and keeps the name, only the
-  fingerprint or a smaller context window can show it.
-- The bank is closed-set: a model outside it is mapped to its nearest look-alike.
-- A probe costs three short answers on your account. A fork that has not answered within five minutes is replaced
-  once, so a slow model does not drop out of the sample.
+- "The model you selected" is the model Codex asked for. If the server swaps the weights and keeps the name, only
+  the fingerprint or a smaller context window can show it: the server's own answer names a model, and a name can be
+  wrong.
+- What the server names is not tied to the session you are working in. It answers for your account at that moment,
+  which is why it can raise a verdict but never clear one.
+- The bank is closed-set: a model outside it is mapped to its nearest look-alike. A name the server returns that
+  Codex's catalog does not list is reported and counts for nothing.
+- A probe costs three short answers on your account, plus one request that is closed before an answer is written.
+  A fork that has not answered within five minutes is replaced once, so a slow model does not drop out of the sample.
 - A model or effort change made through Codex's own settings is shown as a question ("was that you?"), because the
   plugin cannot tell whether you or Codex changed it.
 - The probes run in a private app-server process that identifies itself as the client it checks for (the desktop app,
@@ -126,10 +139,15 @@ verdicts show as "another account" and those sessions are probed again.
 
 ## Privacy
 
-The plugin reads `~/.codex` (session records, the models cache, and `auth.json` only for an account hash and a masked
-e-mail) and writes to `~/.codex/is-gpt-nerfed` (probes, verdicts, `log.jsonl`). The forks are ordinary Codex
-inference under your account. The only network request of its own is one to GitHub every ten minutes for the latest
-release tag, while the app is open; switch it off in Settings and it makes none.
+The plugin reads `~/.codex`: session records, the models cache, and `auth.json` for an account hash and a masked
+e-mail. It writes to `~/.codex/is-gpt-nerfed` (probes, verdicts, `log.jsonl`). The forks are ordinary Codex
+inference under your account.
+
+Two requests leave your Mac, and both are switchable. The server check sends your Codex access token to Codex's own
+backend, once per probe, the same place and the same credential Codex uses; it never reads the refresh token, and
+the token goes nowhere else. Switch it off with `served_check` or in Settings. The app also asks GitHub for the
+latest release tag every ten minutes while it is open (`check_updates`). Nothing else is sent anywhere, and your
+records are never uploaded.
 
 ## Credits
 

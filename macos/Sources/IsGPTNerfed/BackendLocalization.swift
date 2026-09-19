@@ -16,6 +16,9 @@ extension L10n {
         "quote-mismatch-upgrade": #"^Congrats! You've been secretly upgraded: you asked for (\S+), the fingerprint says (\S+) \((\d+%)\)\. Don't tell anyone\.$"#,
         "quote-mismatch-lateral": #"^Congrats! You've been… re-routed\. You asked for (\S+), the fingerprint says (\S+) \((\d+%)\)\. Same tier, different brain\.$"#,
         "quote-downgraded-hard": #"^🎉 Congrats! You've been nerfed! Codex's own records say so: (.+?)\. No notice, no refund, no shame\.$"#,
+        "quote-downgraded-server": #"^🎉 Congrats! You've been nerfed! You asked for (\S+); the server's own response says (\S+) answered\. No notice, no refund, no shame\.$"#,
+        "quote-suspicious-server": #"^Odd: the server's own response says (\S+) answered your (\S+) request, while the fingerprint of the answers says (\S+) \((\d+%)\)\. Watching\.$"#,
+        "quote-suspicious-server-only": #"^Hmm\. The server's own response says (\S+) answered your (\S+) request, and the fingerprint could not check it\. Watching\.$"#,
         "quote-upgraded": #"^🎉 Congrats, and this time we mean it: you've been upgraded\. Codex's own records say so: (.+?)\. Enjoy it while it lasts\.$"#,
         "quote-match-a": #"^All clear: the fingerprint says (\S+) \((\d+%)\), which is what you asked for\. The model you're paying for actually showed up\. Cherish it\.$"#,
         "quote-match-b": #"^No downgrade detected: (\S+) at (\d+%)\. Suspiciously honest\. I'll keep watching\.$"#,
@@ -50,6 +53,12 @@ extension L10n {
         "report-last-attempt": #"^Last attempt · (.+)$"#,
         "report-fingerprint": #"^Fingerprint · (.*)$"#,
         "report-evidence": #"^Evidence · (.+)$"#,
+        "report-server": #"^Server · (.+)$"#,
+        "report-server-part": #"^server: (\S+)$"#,
+        "server-no-answer": #"^no answer: (.+)$"#,
+        "server-as-asked": #"^(\S+), as asked$"#,
+        "server-unrecognized": #"^(\S+), asked for (\S+) · unknown name, not counted$"#,
+        "server-asked-for": #"^(\S+), asked for (\S+)$"#,
         "report-count": #"^(\d+) of (\d+) answers$"#,
         "report-rounds": #"^(\d+) rounds$"#,
         "report-retried-count": #"^retried (\d+)×$"#,
@@ -116,7 +125,9 @@ extension L10n {
         "cannot find the installed IsGPTNerfed.app": "backend.update.app-not-found",
         "archive larger than 300 MB": "backend.update.too-large",
         "sha256 mismatch: the archive is not the one the release lists": "backend.update.checksum-mismatch",
-        "no .app inside the archive": "backend.update.no-app"
+        "no .app inside the archive": "backend.update.no-app",
+        "no valid ChatGPT access token (API-key login, signed out, or expired)": "backend.server.no-token",
+        "the stream ended before response.created": "backend.server.stream-ended"
     ]
 
     /// Translate only app-owned backend templates. Unknown strings and variable data pass through unchanged.
@@ -177,6 +188,15 @@ extension L10n {
         }
         if let c = backendMatch("quote-downgraded-hard", text) {
             return backendFormat("backend.quote.downgraded-hard", arguments: [backendLine(c[0], language: language)], language: language)
+        }
+        if let c = backendMatch("quote-downgraded-server", text) {
+            return backendFormat("backend.quote.downgraded-server", arguments: c, language: language)
+        }
+        if let c = backendMatch("quote-suspicious-server", text) {
+            return backendFormat("backend.quote.suspicious-server", arguments: c, language: language)
+        }
+        if let c = backendMatch("quote-suspicious-server-only", text) {
+            return backendFormat("backend.quote.suspicious-server-only", arguments: c, language: language)
         }
         if let c = backendMatch("quote-upgraded", text) {
             return backendFormat("backend.quote.upgraded", arguments: [backendLine(c[0], language: language)], language: language)
@@ -306,7 +326,27 @@ extension L10n {
         if let c = backendMatch("report-evidence", text) {
             return translateReportEvidence(c[0], language: language)
         }
+        if let c = backendMatch("report-server", text) {
+            return backendFormat("backend.report.server", language: language) + " · " + translateServerValue(c[0], language: language)
+        }
         return nil
+    }
+
+    /// The report's Server line: "gpt-6-astra, as asked" · "gpt-5.6-luna, asked for gpt-6-astra" · "no answer: …".
+    private static func translateServerValue(_ value: String, language: String?) -> String {
+        if let c = backendMatch("server-no-answer", value) {
+            return backendFormat("backend.server.no-answer", arguments: [backendLine(c[0], language: language)], language: language)
+        }
+        if let c = backendMatch("server-as-asked", value) {
+            return backendFormat("backend.server.as-asked", arguments: c, language: language)
+        }
+        if let c = backendMatch("server-unrecognized", value) {
+            return backendFormat("backend.server.unrecognized", arguments: c, language: language)
+        }
+        if let c = backendMatch("server-asked-for", value) {
+            return backendFormat("backend.server.asked-for", arguments: c, language: language)
+        }
+        return value
     }
 
     private static func translateProbeLine(_ text: String, language: String?) -> String {
@@ -332,6 +372,8 @@ extension L10n {
                 output.append(backendFormat("backend.report.client", arguments: c, language: language))
             } else if let c = backendMatch("report-probe-id", part) {
                 output.append(backendFormat("backend.report.probe-id", arguments: c, language: language))
+            } else if let c = backendMatch("report-server-part", part) {
+                output.append(backendFormat("backend.report.server-part", arguments: c, language: language))
             } else if let c = backendMatch("report-declared", part) {
                 output.append(backendFormat("backend.report.prediction-declared", arguments: c, language: language))
             } else if let c = backendMatch("report-prediction", part) {

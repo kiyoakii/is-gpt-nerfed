@@ -26,6 +26,7 @@
 "Call a mismatch at" = "Call a mismatch at";
 "Halt the session after a mismatch" = "Halt the session after a mismatch";
 "Scan rollouts on every turn" = "Scan rollouts on every turn";
+"Also ask the server which model answered" = "Also ask the server which model answered";
 "Notifications" = "Notifications";
 "Also notify on a match" = "Also notify on a match";
 "Post matches into the session" = "Post matches into the session";
@@ -115,6 +116,12 @@
 /* Report and thread details */
 "Fingerprint" = "Fingerprint";
 "Problem" = "Problem";
+"Server" = "Server";
+"server: %@" = "server: %@";
+"%@, as asked" = "%@, as asked";
+"%@, asked for %@" = "%@, asked for %@";
+"%@, asked for %@ · unknown name, not counted" = "%@, asked for %@ · unknown name, not counted";
+"no answer: %@" = "no answer: %@";
 "Account" = "Account";
 "recorded before accounts were tracked; it cannot vouch for the signed-in account" = "recorded before accounts were tracked; it cannot vouch for the signed-in account";
 "probed under another Codex account; it does not vouch for this one" = "probed under another Codex account; it does not vouch for this one";

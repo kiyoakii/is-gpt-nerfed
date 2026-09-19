@@ -38,6 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import codex_appserver as cas  # noqa: E402
 import modeltrace_core as core  # noqa: E402
+import responses_meta  # noqa: E402
 
 VERSION = "0.5.1"
 DGC_BIN = os.path.abspath(__file__)
@@ -92,6 +93,8 @@ DEFAULT_CONFIG = {
     "probe_originator": "auto",      # the client the probes identify as: auto = the session's own (Codex Desktop, or the CLI)
     "hide_titles": False,            # panel shows "Session 1…N" and hides the account label (screenshot mode)
     "fresh_frequency": "manual",     # heartbeat for the fresh-session probe: "30m", "2h" … (time only; "manual" = off)
+    "served_check": True,            # also ask the server which model it says answered (one small request per probe); the fingerprint always runs
+    "served_check_timeout_s": 10,
     "codex_bin": None,
     "nudge_cooldown_turns": 4,
 }
@@ -235,14 +238,14 @@ def parse_frequency(s) -> tuple[str, int]:
 
 def coerce_config_value(key: str, value: str):
     if key in ("passive", "notify", "notify_on_ok", "announce_ok", "sound", "parallel", "halt_on_mismatch", "confirm_uncertain", "check_updates",
-               "hide_titles"):
+               "hide_titles", "served_check"):
         return str(value).strip().lower() in ("1", "true", "yes", "on")
     if key == "mismatch_confidence":
         v = float(value)
         if not 0.5 <= v <= 0.99:
             raise ValueError("mismatch_confidence must be between 0.5 and 0.99")
         return v
-    if key in ("nudge_cooldown_turns", "probe_timeout_s"):
+    if key in ("nudge_cooldown_turns", "probe_timeout_s", "served_check_timeout_s"):
         return max(1, int(value))
     if key == "queries":
         return max(1, min(3, int(value)))
@@ -856,6 +859,9 @@ LINES = {
     "DOWNGRADED_HARD": [
         "🎉 Congrats! You've been nerfed! Codex's own records say so: {detail}. No notice, no refund, no shame.",
     ],
+    "DOWNGRADED_SERVER": [
+        "🎉 Congrats! You've been nerfed! You asked for {expected}; the server's own response says {served} answered. No notice, no refund, no shame.",
+    ],
     "UPGRADED": [
         "🎉 Congrats, and this time we mean it: you've been upgraded. Codex's own records say so: {detail}. Enjoy it while it lasts.",
     ],
@@ -865,6 +871,12 @@ LINES = {
     ],
     "SUSPICIOUS": [
         "Hmm. The fingerprint leans {top} ({p:.0%}) over your {expected} ({p_exp:.0%}), but not confidently enough to call it. I asked again and it is still murky. Watching.",
+    ],
+    "SUSPICIOUS_SERVER": [
+        "Odd: the server's own response says {served} answered your {expected} request, while the fingerprint of the answers says {top} ({p:.0%}). Watching.",
+    ],
+    "SUSPICIOUS_SERVER_ONLY": [
+        "Hmm. The server's own response says {served} answered your {expected} request, and the fingerprint could not check it. Watching.",
     ],
     "UNLISTED": [
         "{expected} isn't in the fingerprint bank yet, so I can only tell you who it looks like: {top} ({p:.0%}). Not a verdict.",
@@ -1007,6 +1019,91 @@ def needs_confirmation(expected: str | None, outputs: list[dict], cfg: dict) -> 
     return assess(expected, analysis, [], cfg)["verdict"] == "SUSPICIOUS"
 
 
+DATE_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
+
+
+def served_slug(name) -> str:
+    """A model name as the catalog spells it: lowercase, no provider prefix, no dated-snapshot suffix
+    (gpt-6-astra-2026-08-20 is gpt-6-astra)."""
+    return DATE_SUFFIX.sub("", normalize_model(name))
+
+
+def served_model_check(model: str | None, effort: str | None, cfg: dict, originator: str | None = None) -> dict | None:
+    """The server's own answer for the model and effort a probe is about to fingerprint (responses_meta). None when
+    the check is switched off or there is no model to ask about; a failed check comes back with an "error"."""
+    if not model or not cfg.get("served_check", True):
+        return None
+    try:
+        return responses_meta.check_served_model(model, CODEX_HOME, effort=effort,
+                                                 timeout_s=float(cfg.get("served_check_timeout_s") or 10),
+                                                 originator=originator or "codex_cli_rs", client_version=VERSION)
+    except Exception as e:
+        log_event("served_check_error", level="warn", error=repr(e)[:200])
+        return {"ok": False, "requested": model, "effort": effort, "served": None, "error": f"unexpected error: {e!r}"[:200]}
+
+
+def server_finding(served: dict | None, cat: dict | None = None) -> dict | None:
+    """What the server check says about the model it asked for:
+      same          the requested model (a dated snapshot of it counts)
+      downgrade     a model compare_models ranks below the requested one
+      lateral       a known model the catalog does not rank, or ranks above only weakly
+      upgrade       a known model ranked above it (high or medium confidence)
+      unrecognized  a name neither Codex's catalog nor the fingerprint bank knows: reported, never counted
+      failed        no answer
+    None when the check did not run."""
+    if not served:
+        return None
+    requested = served.get("requested")
+    if not served.get("ok") or not served.get("served"):
+        return {"state": "failed", "model": None, "requested": requested, "error": served.get("error") or "no answer"}
+    name, exp = str(served["served"]), served_slug(requested)
+    slug = served_slug(name)
+    if not exp:
+        return {"state": "unrecognized", "model": name, "requested": requested}
+    if slug == exp:
+        return {"state": "same", "model": name, "requested": requested}
+    cat = load_catalog() if cat is None else cat
+    known = {k.lower() for k in cat} | {m.lower() for m in core.bank_model_ids(load_bank())}
+    if slug not in known:
+        return {"state": "unrecognized", "model": name, "requested": requested}
+    cmp = compare_models(exp, slug, cat)
+    state = cmp["direction"]
+    if state == "upgrade" and cmp["confidence"] == "low":
+        state = "lateral"
+    return {"state": state, "model": name, "requested": requested, "why": cmp["reason"]}
+
+
+def combine_with_server(fp: dict, server: dict | None) -> dict:
+    """The fingerprint's verdict, adjusted by what the server says. The server can raise a verdict, never clear one:
+    a Match the server contradicts (it names a worse or a different model) becomes Suspicious, and a verdict the
+    fingerprint could not reach (no answers, an unlisted model, a Suspicious lean) is decided by a downgrade the
+    server admits to. An upgrade, an unrecognized name or a failed check changes nothing; they are reported next to
+    the verdict."""
+    a = dict(fp)
+    state = (server or {}).get("state")
+    if state not in ("downgrade", "lateral") or fp["verdict"] in ("MISMATCH", "DOWNGRADED!", "UNKNOWN"):
+        return a
+    if fp["verdict"] == "MATCH":  # the answers look like the requested model, the server names another
+        a.update(verdict="SUSPICIOUS", direction="server", confidence="low")
+    elif state == "downgrade":  # the fingerprint could not settle it; the server admits a downgrade
+        a.update(verdict="DOWNGRADED!", direction="server", confidence="high")
+    elif fp["verdict"] != "SUSPICIOUS":  # a lateral switch the fingerprint could not check
+        a.update(verdict="SUSPICIOUS", direction="server", confidence="low")
+    return a
+
+
+def server_fact(server: dict) -> str:
+    """The CLI card's line for the server check."""
+    if server["state"] == "failed":
+        return f"server check: no answer ({server.get('error')})"
+    line = f"server says {server['model']}"
+    if server["state"] == "same":
+        return line + " (as asked)"
+    if server["state"] == "unrecognized":
+        return line + f" for {server.get('requested')}: a name Codex's catalog does not list, not counted"
+    return line + f" for {server.get('requested')} ({server['state']}: {server.get('why')})"
+
+
 def parent_hard_evidence(thread_id: str | None, rollout_hint: str | None = None) -> tuple[list[dict], list[dict]]:
     """Refresh the parent thread's passive scan and return (hard, soft) evidence."""
     if not thread_id:
@@ -1036,7 +1133,11 @@ def finalize_probe(rec: dict, outputs: list[dict], expected: str | None, errors:
     if outputs and analysis is None and not errors:
         errors = errors + ["no usable answer"]
     hard, soft = parent_hard_evidence(rec.get("thread_id"), (rec.get("thread") or {}).get("path"))
-    a = assess(expected, analysis, hard, cfg)
+    fp = assess(expected, analysis, hard, cfg)
+    server = server_finding(rec.get("served"))
+    if server:
+        rec["server"] = server
+    a = combine_with_server(fp, server)
     verdict, direction = a["verdict"], a["direction"]
     top = analysis["prediction"] if analysis else None
     p = analysis["probability"] if analysis else 0.0
@@ -1044,13 +1145,17 @@ def finalize_probe(rec: dict, outputs: list[dict], expected: str | None, errors:
     n = analysis["used_outputs"] if analysis else 0
     q = int(rec.get("queries") or 1) * int(rec.get("rounds") or 1)
     fmt = {"expected": expected or "?", "top": top or "?", "p": p, "p_exp": p_exp, "n": n, "q": q,
+           "served": (server or {}).get("model") or "?",
            "detail": hard[0]["detail"] if hard else "", "reason": "; ".join(errors)[:160] or "no answers"}
     if verdict == "DOWNGRADED!":
-        quote = pet_line("DOWNGRADED_HARD", seed=rec["id"], **fmt)
+        quote = pet_line("DOWNGRADED_SERVER" if direction == "server" else "DOWNGRADED_HARD", seed=rec["id"], **fmt)
     elif verdict == "MISMATCH":
         quote = pet_line(f"MISMATCH_{direction}", seed=rec["id"], **fmt)
     elif verdict == "SUSPICIOUS":
-        quote = pet_line("SUSPICIOUS", seed=rec["id"], **fmt)
+        if direction == "server":
+            quote = pet_line("SUSPICIOUS_SERVER" if analysis else "SUSPICIOUS_SERVER_ONLY", seed=rec["id"], **fmt)
+        else:
+            quote = pet_line("SUSPICIOUS", seed=rec["id"], **fmt)
     elif verdict in ("MATCH",):
         quote = pet_line("MATCH", seed=rec["id"], **fmt)
     elif verdict == "UNLISTED":
@@ -1060,7 +1165,7 @@ def finalize_probe(rec: dict, outputs: list[dict], expected: str | None, errors:
     else:
         quote = pet_line("INVALID", seed=rec["id"], **fmt)
 
-    rec.update({"status": "done" if analysis else "failed", "finished": iso(), "expected": expected, "prediction": top,
+    rec.update({"status": "done" if (analysis or verdict != fp["verdict"]) else "failed", "finished": iso(), "expected": expected, "prediction": top,
                 "probability": round(p, 4) if analysis else None, "p_expected": round(p_exp, 4) if analysis else None,
                 "margin": round(a["margin"], 3) if a.get("margin") is not None else None, "confidence": a.get("confidence"),
                 "used_outputs": n, "verdict": verdict, "direction": direction, "rounds": int(rec.get("rounds") or 1),
@@ -1084,6 +1189,7 @@ def finalize_probe(rec: dict, outputs: list[dict], expected: str | None, errors:
               margin=rec.get("margin"), confidence=rec.get("confidence"), used_outputs=n, queries=rec.get("queries"),
               rounds=rec.get("rounds"), retries=rec.get("retries"), waited_for_turn=rec.get("waited_for_turn"),
               elapsed_s=rec.get("elapsed_s"), account=(rec.get("account") or {}).get("id"),
+              server=(server or {}).get("model"), server_state=(server or {}).get("state"),
               top=[{"model": r["model"], "p": r.get("probability"), "score": r.get("score")} for r in (rec.get("results") or [])[:3]],
               hard_evidence=[e.get("detail") for e in hard[:3]], soft_evidence=[e.get("detail") for e in soft[:2]],
               errors=errors[:3] or None)
@@ -1097,6 +1203,8 @@ def finalize_probe(rec: dict, outputs: list[dict], expected: str | None, errors:
     if analysis:
         facts.append("top candidates: " + ", ".join(f"{r['model']} {r['probability']:.0%}" for r in analysis["results"][:3])
                      + f"  ·  calibration n={analysis['calibration']['queries']} (cv {analysis['calibration']['cv_accuracy']:.1%})")
+    if server:
+        facts.append(server_fact(server))
     for e in hard[:3]:
         facts.append("hard evidence: " + e["detail"])
     for e in soft[:2]:
@@ -1149,6 +1257,19 @@ def resolve_originator(cfg: dict, codex_bin: str | None, thread_row: dict | None
     return (thread_row or {}).get("originator") or default_originator(codex_bin)
 
 
+def ask_server(rec: dict, model: str | None, effort: str | None, cfg: dict, originator: str) -> None:
+    """The server check of a probe (served_check): one small request before the forks, recorded on the probe.
+    It never replaces them; finalize_probe weighs the two."""
+    served = served_model_check(model, effort, cfg, originator=originator)
+    if served is None:
+        return
+    rec["served"] = served
+    write_json(probe_path(rec["id"]), rec)
+    log_event("served_check", level="info" if served.get("ok") else "warn", probe=rec["id"], sid=rec.get("thread_id"),
+              mode=rec.get("mode"), requested=model, effort=effort, served=served.get("served"),
+              elapsed_s=served.get("elapsed_s"), error=served.get("error"))
+
+
 def run_fork_probe(thread_id: str, cfg: dict, queries: int | None = None, quiet: bool = False, originator: str | None = None) -> dict:
     ensure_dirs()
     cb = codex_bin(cfg)
@@ -1172,24 +1293,24 @@ def run_fork_probe(thread_id: str, cfg: dict, queries: int | None = None, quiet:
             if st.get("probe_running"):
                 st["probe_running"]["note"] = "waiting for the current turn to finish"
 
-    orig = resolve_originator(cfg, cb, db_thread(thread_id), originator)
+    row = db_thread(thread_id)
+    orig = resolve_originator(cfg, cb, row, originator)
     rec["originator"] = orig
     write_json(probe_path(rec["id"]), rec)
     log_event("probe_originator", probe=rec["id"], sid=thread_id, originator=orig)
+    ask_server(rec, (row or {}).get("model"), (row or {}).get("reasoning_effort"), cfg, orig)
 
     def runner(n: int = q):
         return cas.probe_thread(cb, thread_id, queries=n, languages=cfg.get("languages") or ["zh", "en"],
                                 timeout_s=float(cfg.get("probe_timeout_s") or 300), parallel=bool(cfg.get("parallel", True)),
                                 busy_wait_s=float(cfg.get("busy_wait_s") or 600), on_wait=on_wait, originator=orig)
 
+    expected = row.get("model") if row else None
     outputs, errors, out = probe_round(runner, rec)
     if out:
         rec["thread"], rec["forks"], rec["elapsed_s"] = out["thread"], out["forks"], out["elapsed_s"]
-        expected = out["thread"].get("model")
+        expected = out["thread"].get("model") or expected
         outputs, errors = top_up_timeouts(rec, outputs, errors, q, runner, sid=thread_id, mode="fork")
-    else:
-        row = db_thread(thread_id)
-        expected = row.get("model") if row else None
     if needs_confirmation(expected, outputs, cfg):  # SUSPICIOUS first round: one more round before the verdict is final
         rec["rounds"] = 2
         log_event("probe_confirm_round", probe=rec["id"], sid=thread_id, reason="first round SUSPICIOUS")
@@ -1307,6 +1428,8 @@ def run_fresh_probe(cfg: dict, model: str | None = None, effort: str | None = No
     rec["originator"] = orig
     write_json(probe_path(rec["id"]), rec)
     log_event("probe_originator", probe=rec["id"], mode="fresh", originator=orig)
+
+    ask_server(rec, model, effort, cfg, orig)
 
     def runner(n: int = q):
         return cas.probe_fresh(cb, model, effort=effort, queries=n, languages=cfg.get("languages") or ["zh", "en"],
@@ -1640,6 +1763,34 @@ def cmd_probe_fresh(args) -> int:
     return 0
 
 
+def cmd_served(args) -> int:
+    """The server check on its own: which model the server says answers a request for this model right now.
+    Exit 0: the model asked for; 2: another model; 1: no answer."""
+    cfg = load_config()
+    model, effort = args.model, args.effort
+    if not model:
+        dm, de = default_model_settings()
+        model, effort = dm, effort or de
+    if not model:
+        raise SystemExit("no default model found; pass --model")
+    orig = resolve_originator(cfg, codex_bin(cfg), None, args.originator)
+    r = responses_meta.check_served_model(model, CODEX_HOME, effort=effort, timeout_s=float(cfg.get("served_check_timeout_s") or 10),
+                                          originator=orig, client_version=VERSION)
+    f = server_finding(r)
+    print(f"asked for:   {model}" + (f" @ {effort}" if effort else "") + f"  (as {orig})")
+    if f["state"] == "failed":
+        print(f"no answer:   {f['error']}")
+        return 1
+    what = {"same": "the model asked for", "downgrade": "a downgrade", "upgrade": "an upgrade",
+            "lateral": "a different model the catalog does not rank", "unrecognized": "a name Codex's catalog does not list"}[f["state"]]
+    print(f"server says: {f['model']}  ({what}" + (f": {f['why']}" if f.get("why") else "") + ")")
+    if r.get("header_model") and r.get("body_model") and served_slug(r["header_model"]) != served_slug(r["body_model"]):
+        print(f"             OpenAI-Model header {r['header_model']}, response.model {r['body_model']}")
+    print(f"             {r.get('elapsed_s')} s" + (f"  ·  request {r['request_id']}" if r.get("request_id") else ""))
+    print("This is what the server says. Only a probe's fingerprint checks which model actually answered.")
+    return 0 if f["state"] == "same" else 2
+
+
 # ---------------------------------------------------------------------------------------- hooks
 
 
@@ -1865,15 +2016,22 @@ def probe_line(p: dict) -> str:
     word = {"DOWNGRADED!": "Downgraded", "MISMATCH": {"downgrade": "Downgrade", "upgrade": "Upgrade"}.get(p.get("direction") or "", "Rerouted"),
             "SUSPICIOUS": "Suspicious", "MATCH": "Match", "UNLISTED": "Unlisted", "INVALID": "Invalid"}.get(v, str(v).capitalize())
     parts = [word]
+    server_differs = bool(p.get("server_model")) and p.get("server_state") in SERVER_NAMED_OTHER
     if v == "INVALID" or p.get("status") == "failed":
         parts.append((p.get("errors") or ["no usable sample"])[0])
     else:
-        text = p.get("prediction") or "?"
-        if isinstance(p.get("probability"), (int, float)):
-            text += f" {p['probability']:.0%}"
-        if p.get("expected") and p.get("expected") != p.get("prediction") and isinstance(p.get("p_expected"), (int, float)):
-            text += f", declared {p['p_expected']:.0%}"
-        parts.append(text)
+        server = f"server: {p['server_model']}" if server_differs else None
+        if server and p.get("direction") == "server":  # the server made the verdict: its answer leads
+            parts.append(server)
+        if p.get("prediction") or not server:
+            text = p.get("prediction") or "?"
+            if isinstance(p.get("probability"), (int, float)):
+                text += f" {p['probability']:.0%}"
+            if p.get("expected") and p.get("expected") != p.get("prediction") and isinstance(p.get("p_expected"), (int, float)):
+                text += f", declared {p['p_expected']:.0%}"
+            parts.append(text)
+        if server and p.get("direction") != "server":
+            parts.append(server)
     n, q = p.get("used_outputs"), p.get("queries")
     if isinstance(n, int) and isinstance(q, int) and q:
         parts.append(f"{n} of {q} answers")
@@ -1892,6 +2050,20 @@ def probe_line(p: dict) -> str:
         parts.insert(1, f"{word}, account unknown" if p.get("account_state") == "unknown" else f"{word}, another account")
     parts.append(f"probe {p.get('id')}")
     return " · ".join(parts)
+
+
+SERVER_NAMED_OTHER = ("downgrade", "lateral", "upgrade")  # the server named a known model other than the one asked for
+
+
+def server_report_value(p: dict) -> str:
+    """The report's Server line: 'gpt-6-astra, as asked' · 'gpt-5.6-luna, asked for gpt-6-astra' · 'no answer: …'."""
+    state, model = p.get("server_state"), p.get("server_model")
+    if state == "failed":
+        return f"no answer: {p.get('server_error') or 'unknown error'}"
+    if state == "same":
+        return f"{model}, as asked"
+    line = f"{model}, asked for {p.get('server_requested') or p.get('expected') or '?'}"
+    return line + " · unknown name, not counted" if state == "unrecognized" else line
 
 
 def probe_row_valid(r: dict) -> bool:
@@ -1917,6 +2089,8 @@ def report_text_for(title: str, model: str | None, effort: str | None, probes: l
         lines.append(("Last probe" if i == 0 else "Earlier") + " · " + probe_line(p))
         if i == 0 and p.get("results") and not p.get("stale_account"):
             lines.append("Fingerprint · " + " · ".join(f"{r.get('model')} {(r.get('probability') or 0):.0%}" for r in p["results"]))
+        if i == 0 and p.get("server_state") and not p.get("stale_account"):
+            lines.append("Server · " + server_report_value(p))
     if not probes:
         lines.append("No probe yet")
     if failure:
@@ -1946,6 +2120,8 @@ def probe_summary(row: dict, current: str | None = None) -> dict:
         "elapsed_s": row.get("elapsed_s"), "errors": errors[:4], "quote": full.get("quote"), "started": full.get("started"),
         "originator": full.get("originator"),
         "results": [{"model": r.get("model"), "probability": r.get("probability")} for r in (full.get("results") or [])[:4]],
+        "server_model": (full.get("server") or {}).get("model"), "server_state": (full.get("server") or {}).get("state"),
+        "server_requested": (full.get("server") or {}).get("requested"), "server_error": (full.get("server") or {}).get("error"),
         "is_downgrade": verdict == "DOWNGRADED!" or (verdict == "MISMATCH" and row.get("direction") == "downgrade"),
         "is_upgrade": verdict == "MISMATCH" and row.get("direction") == "upgrade",
         "is_suspicious": verdict == "SUSPICIOUS",
@@ -3064,6 +3240,17 @@ def cmd_selftest(args) -> int:
     expect(fingerprint_verdict("gpt-5.6-luna", fake, []) == ("MATCH", None), "expected = fingerprint → MATCH")
     expect(fingerprint_verdict("gpt-7-nova", fake, []) == ("UNLISTED", None), "unknown expected model → UNLISTED")
     expect(fingerprint_verdict("gpt-6-astra", fake, [{"detail": "x"}]) == ("DOWNGRADED!", "hard"), "hard evidence overrides")
+    ask = lambda asked, name: server_finding({"ok": True, "requested": asked, "served": name}, {})
+    expect(ask("gpt-6-astra", "gpt-6-astra-2026-08-20")["state"] == "same" and ask("gpt-6-astra", "openai/GPT-6-Astra")["state"] == "same",
+           "server check: a dated snapshot or a provider prefix is the model asked for")
+    expect(ask("gpt-6-astra", "gpt-5.6-luna")["state"] == "downgrade" and ask("gpt-6-astra", "gpt-6-astra-internal-x")["state"] == "unrecognized",
+           "server check: a known downgrade counts, an unknown name does not")
+    luna_match = assess("gpt-5.6-luna", fake, [])
+    expect(combine_with_server(luna_match, ask("gpt-5.6-luna", "gpt-5.5"))["verdict"] == "SUSPICIOUS", "server contradicting a Match: Suspicious, not Downgraded")
+    expect(combine_with_server(luna_match, ask("gpt-5.6-luna", "gpt-5.6-luna"))["verdict"] == "MATCH", "server agreeing changes nothing")
+    expect(combine_with_server(assess("gpt-6-astra", fake, []), ask("gpt-6-astra", "gpt-6-astra"))["verdict"] == "MISMATCH", "server agreeing cannot clear a Mismatch")
+    expect(combine_with_server(assess("gpt-6-astra", None, []), ask("gpt-6-astra", "gpt-5.6-luna"))["verdict"] == "DOWNGRADED!",
+           "server's admitted downgrade decides when the fingerprint has no answer")
     shutil.rmtree(tmp, ignore_errors=True)
     print("selftest:", "PASS" if not fails else f"{fails} FAILURE(S)")
     return 0 if not fails else 1
@@ -3104,9 +3291,19 @@ METHOD = f"""is-gpt-nerfed — how the verdict is made (v{VERSION})
      INVALID      no usable sample (tool use attempted, refusal, truncation, transport error; one automatic retry on transport)
    Inside a /side conversation the model answers the same challenge itself; the numbers stay in the ephemeral
    side session, never in your main context.
+3. SERVER CHECK (served_check, on by default; one small request per probe). Before the forks, the probe sends one
+   streaming request for the same model and effort to Codex's backend with your ChatGPT access token and reads which
+   model the server names (the OpenAI-Model header, which Codex itself checks, or response.model in the first
+   event), then closes the connection. It is the server's label, weighed next to the fingerprint, never instead:
+     server names the model asked for      no change (a Mismatch stays a Mismatch: the label can be wrong)
+     server names a worse or other model   a Match becomes SUSPICIOUS; with no fingerprint verdict (no answers,
+                                           an unlisted model, a Suspicious lean) a downgrade decides: DOWNGRADED!
+     server names a better model           reported, no change
+     unknown name, no answer               reported, no change
 
 WHAT IT CANNOT DO
-  • It cannot see which weights actually served a request. "Declared model" is what Codex asked for.
+  • It cannot see which weights actually served a request. "Declared model" is what Codex asked for; the server
+    check reports what the server says served it, which is a label too.
   • Attribution is closed-set: a model outside the bank is mapped to its nearest look-alike. A quantised or
     "dumbed-down" variant that keeps the slug only shows up if its number distribution drifts.
   • Probes fork from persisted history: a turn still in flight is not included.
@@ -3178,6 +3375,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--thread")
     s.add_argument("--rollout")
     s.set_defaults(fn=cmd_scan)
+    s = sub.add_parser("served", help="ask the server which model it says answers a request for this model (one small request, no fingerprint)")
+    s.add_argument("--model", help="model slug to ask about (default: the model a new session would use)")
+    s.add_argument("--effort", help="reasoning effort to ask with (default: a new session's)")
+    s.add_argument("--originator", help="identify the check as this client (default: as the probes do)")
+    s.set_defaults(fn=cmd_served)
     s = sub.add_parser("audit", help="scan every rollout modified in the last N days")
     s.add_argument("--days", type=float, default=7)
     s.add_argument("--include-subagents", action="store_true")

@@ -26,6 +26,7 @@
 "Call a mismatch at" = "不匹配判定阈值";
 "Halt the session after a mismatch" = "模型不匹配时暂停会话";
 "Scan rollouts on every turn" = "每轮扫描会话记录";
+"Also ask the server which model answered" = "同时询问服务器实际用的模型";
 "Notifications" = "通知";
 "Also notify on a match" = "匹配时也通知";
 "Post matches into the session" = "匹配时也发送会话消息";
@@ -115,6 +116,12 @@
 /* 报告与会话详情 */
 "Fingerprint" = "模型指纹";
 "Problem" = "问题";
+"Server" = "服务器";
+"server: %@" = "服务器：%@";
+"%@, as asked" = "%@，与所选一致";
+"%@, asked for %@" = "%@，所选为 %@";
+"%@, asked for %@ · unknown name, not counted" = "%@，所选为 %@ · 名称未知，不计入判定";
+"no answer: %@" = "未回答：%@";
 "Account" = "账户";
 "recorded before accounts were tracked; it cannot vouch for the signed-in account" = "当时尚未记录账户，结果不适用于当前账户";
 "probed under another Codex account; it does not vouch for this one" = "检测时登录的是其他账户，结果不适用于当前账户";

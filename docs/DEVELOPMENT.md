@@ -21,6 +21,39 @@ python3 -m unittest discover -s tests -v
 NERFED_DEMO=1 ~/Applications/IsGPTNerfed.app/Contents/MacOS/IsGPTNerfed --render docs/panel.png   # README images
 ```
 
+## The server check (`served_check`)
+
+`responses_meta.check_served_model()` makes one streaming POST to `https://chatgpt.com/backend-api/codex/responses`
+with the model and reasoning effort the probe is about to fingerprint, reads the model the server names, and closes
+the connection at the first event. `ask_server()` runs it before the forks on both probe modes and stores it on the
+record as `served`; `nerfed served` runs it alone.
+
+- Two places carry the name. `OpenAI-Model` (response header) is the one Codex itself reads: it turns into
+  `ResponseEvent::ServerModel`, and a difference from the requested model logs "server reported model X while
+  requested model was Y" and raises `ModelReroute` (the gpt-5.3-codex → gpt-5.2 cyber-activity reroute). Codex does
+  not read `response.model` from the `response.created` event, which is the Responses API's own field. The check
+  prefers the header and falls back to the body.
+- On this maintainer's Mac the header has never appeared: 0 occurrences of "server reported model" or "openai-model"
+  in 675k rows of `~/.codex/logs_2.sqlite` (10 days, 547 header dumps), including the hours when probes fingerprinted
+  luna for an astra session. Codex never logs response bodies, so what `response.model` said then cannot be checked.
+  Treat the check as a second opinion of unproven yield, not as a detector in its own right.
+- `x-codex-safety-buffering-*` is not used: the `faster-model` header was present on every response in those logs
+  (25/25 and 9/9 sampled), so it discriminates nothing.
+- Token rules: the ChatGPT access token from `auth.json` is read only while its JWT `exp` is in the future and is
+  sent only to the module's constant URL — no environment override, and redirects are refused (`_NoRedirect`),
+  because urllib would otherwise repeat the Authorization header to wherever a 3xx points. The refresh token is
+  never read (OpenAI rotates it on use; consuming one would break the user's Codex login). The request carries
+  `ChatGPT-Account-Id` as Codex does, identifies as the probe's originator, and names itself in the User-Agent.
+- `server_finding()` reads the answer: `same` (a dated snapshot such as `gpt-6-astra-2026-08-20` counts as the model
+  asked for), `downgrade` / `upgrade` / `lateral` through `compare_models`, `unrecognized` for a name neither the
+  catalog nor the bank knows, `failed` for no answer.
+- `combine_with_server()` weighs it. The server can raise a verdict, never clear one: a Match it contradicts becomes
+  Suspicious, and a downgrade it admits to decides when the fingerprint reached no verdict (no answers, an unlisted
+  model, a Suspicious lean). An upgrade, an unrecognized name and a failed check change nothing. A fingerprint
+  Mismatch stands whatever the server says, because a swap that keeps the name is what the fingerprint is for.
+- The check answers for the account at that moment, not for the session being probed: it is a bare request with no
+  history. That is why it may not clear a verdict, only raise one.
+
 ## Localization
 
 The macOS presentation layer supports English and Simplified Chinese (`zh-Hans`), using localized

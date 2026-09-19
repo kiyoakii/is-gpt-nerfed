@@ -32,6 +32,9 @@ extension ProbeSummary {
 
     var isFailure: Bool { verdict == "INVALID" || status == "failed" }
 
+    /// The server named a known model other than the one asked for: worth a word in the row, not only in the report.
+    var serverNamedOther: Bool { serverModel != nil && ["downgrade", "lateral", "upgrade"].contains(serverState ?? "") }
+
     /// "gpt-5.6-luna 91%, declared 3% · 2 rounds · retried once"
     var detail: String {
         var parts: [String] = []
@@ -40,10 +43,16 @@ extension ProbeSummary {
         } else if staleAccount == true {
             parts.append(prediction ?? "?")  // unverified for this account: the numbers would only lend false weight
         } else {
-            var s = prediction ?? "?"
-            if !probabilityText.isEmpty { s += " \(probabilityText)" }
-            if let e = expected, e != prediction, let pe = pExpected { s += ", \(L10n.tr("declared %@", Self.pct(pe)))" }
-            parts.append(s)
+            // The server's answer leads when it made the verdict (a narrow row truncates the end), follows otherwise.
+            let server = serverNamedOther ? serverModel.map { L10n.tr("server: %@", $0) } : nil
+            if direction == "server", let server { parts.append(server) }
+            if prediction != nil || server == nil {  // a verdict the server reached without answers has no fingerprint to show
+                var s = prediction ?? "?"
+                if !probabilityText.isEmpty { s += " \(probabilityText)" }
+                if let e = expected, e != prediction, let pe = pExpected { s += ", \(L10n.tr("declared %@", Self.pct(pe)))" }
+                parts.append(s)
+            }
+            if direction != "server", let server { parts.append(server) }
             if let n = usedOutputs, let q = queries, n < q { parts.append(L10n.tr("%@ of %@ answers", String(n), String(q))) }
             if let r = rounds, r > 1 { parts.append(L10n.tr("%@ rounds", String(r))) }
         }
@@ -436,6 +445,9 @@ struct ReportLines: View {
                 if let r = p.results, !r.isEmpty, !p.isFailure, p.staleAccount != true {
                     fact(L10n.tr("Fingerprint"), r.map { "\($0.model ?? "?") \(ProbeSummary.pct($0.probability))" }.joined(separator: " · "))
                 }
+                if let state = p.serverState, p.staleAccount != true {
+                    fact(L10n.tr("Server"), serverValue(p), tint: serverTint(state))
+                }
                 ForEach(Array((p.errors ?? []).enumerated()), id: \.offset) { _, e in
                     fact(L10n.tr("Problem"), L10n.backend(e), tint: .orange)
                 }
@@ -473,6 +485,27 @@ struct ReportLines: View {
         HStack(alignment: .top, spacing: 4) {
             Text(label).foregroundStyle(.tertiary).frame(width: 64, alignment: .leading)
             Text(value).foregroundStyle(tint).lineLimit(3)
+        }
+    }
+
+    /// What the server said about the model the probe asked for (served_check). It is weighed next to the fingerprint.
+    private func serverValue(_ p: ProbeSummary) -> String {
+        let model = p.serverModel ?? "?"
+        let asked = p.serverRequested ?? p.expected ?? "?"
+        switch p.serverState {
+        case "failed": return L10n.tr("no answer: %@", p.serverError.map { L10n.backend($0) } ?? "?")
+        case "same": return L10n.tr("%@, as asked", model)
+        case "unrecognized": return L10n.tr("%@, asked for %@ · unknown name, not counted", model, asked)
+        default: return L10n.tr("%@, asked for %@", model, asked)
+        }
+    }
+
+    private func serverTint(_ state: String) -> Color {
+        switch state {
+        case "downgrade": return .red
+        case "lateral": return .orange
+        case "upgrade": return .green
+        default: return .secondary
         }
     }
 

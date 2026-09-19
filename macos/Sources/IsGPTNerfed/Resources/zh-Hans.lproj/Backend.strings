@@ -31,6 +31,14 @@
 "backend.report.no-probe" = "尚未检测";
 "backend.report.last-attempt" = "最近一次尝试";
 "backend.report.fingerprint" = "模型指纹";
+"backend.report.server" = "服务器";
+"backend.report.server-part" = "服务器：%@";
+"backend.server.as-asked" = "%@，与所选一致";
+"backend.server.asked-for" = "%@，所选为 %@";
+"backend.server.unrecognized" = "%@，所选为 %@ · 名称未知，不计入判定";
+"backend.server.no-answer" = "未回答：%@";
+"backend.server.no-token" = "没有有效的 ChatGPT 访问令牌（API 密钥登录、已退出或已过期）";
+"backend.server.stream-ended" = "响应流在 response.created 之前就结束了";
 "backend.report.evidence" = "证据";
 "backend.report.reverted" = "已还原";
 "backend.report.count" = "%@ / %@ 个回答";
@@ -74,6 +82,9 @@
 "backend.quote.mismatch-upgrade" = "恭喜，你被悄悄升配了：你选的是 %@，指纹结果更像 %@（%@）。先别声张。";
 "backend.quote.mismatch-lateral" = "恭喜，模型被悄悄换了。你选的是 %@，指纹结果更像 %@（%@）。级别相同，回答风格不同。";
 "backend.quote.downgraded-hard" = "🎉 恭喜，你被降配了！Codex 自己的记录也显示：%@。没有通知，没有退款，也不必觉得难堪。";
+"backend.quote.downgraded-server" = "🎉 恭喜，你被降配了！你选的是 %@，服务器自己的响应却说回答的是 %@。没有通知，没有退款，也不必觉得难堪。";
+"backend.quote.suspicious-server" = "奇怪：服务器自己的响应说是 %@ 回答了你选的 %@，但这些回答的指纹结果是 %@（%@）。继续观察。";
+"backend.quote.suspicious-server-only" = "服务器自己的响应说是 %@ 回答了你选的 %@，指纹这次没能核对。继续观察。";
 "backend.quote.upgraded" = "🎉 恭喜，这次是真的升配了。Codex 自己的记录显示：%@。趁现在好好享受。";
 "backend.quote.match-a" = "一切正常：指纹结果为 %@（%@），与你选的模型一致。你付费使用的模型确实在回答。好好珍惜。";
 "backend.quote.match-b" = "没有检测到降配：%@ 的指纹概率为 %@。结果出奇地诚实，我会继续留意。";

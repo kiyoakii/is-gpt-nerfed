@@ -31,6 +31,14 @@
 "backend.report.no-probe" = "No probe yet";
 "backend.report.last-attempt" = "Last attempt";
 "backend.report.fingerprint" = "Fingerprint";
+"backend.report.server" = "Server";
+"backend.report.server-part" = "server: %@";
+"backend.server.as-asked" = "%@, as asked";
+"backend.server.asked-for" = "%@, asked for %@";
+"backend.server.unrecognized" = "%@, asked for %@ · unknown name, not counted";
+"backend.server.no-answer" = "no answer: %@";
+"backend.server.no-token" = "no valid ChatGPT access token (API-key login, signed out, or expired)";
+"backend.server.stream-ended" = "the stream ended before response.created";
 "backend.report.evidence" = "Evidence";
 "backend.report.reverted" = "reverted";
 "backend.report.count" = "%@ of %@ answers";
@@ -74,6 +82,9 @@
 "backend.quote.mismatch-upgrade" = "Congrats! You've been secretly upgraded: you asked for %@, the fingerprint says %@ (%@). Don't tell anyone.";
 "backend.quote.mismatch-lateral" = "Congrats! You've been… re-routed. You asked for %@, the fingerprint says %@ (%@). Same tier, different brain.";
 "backend.quote.downgraded-hard" = "🎉 Congrats! You've been nerfed! Codex's own records say so: %@. No notice, no refund, no shame.";
+"backend.quote.downgraded-server" = "🎉 Congrats! You've been nerfed! You asked for %@; the server's own response says %@ answered. No notice, no refund, no shame.";
+"backend.quote.suspicious-server" = "Odd: the server's own response says %@ answered your %@ request, while the fingerprint of the answers says %@ (%@). Watching.";
+"backend.quote.suspicious-server-only" = "Hmm. The server's own response says %@ answered your %@ request, and the fingerprint could not check it. Watching.";
 "backend.quote.upgraded" = "🎉 Congrats, and this time we mean it: you've been upgraded. Codex's own records say so: %@. Enjoy it while it lasts.";
 "backend.quote.match-a" = "All clear: the fingerprint says %@ (%@), which is what you asked for. The model you're paying for actually showed up. Cherish it.";
 "backend.quote.match-b" = "No downgrade detected: %@ at %@. Suspiciously honest. I'll keep watching.";

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- A second check next to the fingerprint: every probe first asks Codex's backend which model it says answers a
+  request for the session's model and effort (the `OpenAI-Model` header Codex itself checks, or `response.model` in
+  the first event), then closes the connection. The fingerprint still runs every time. The server's answer can raise
+  a verdict but never clear one: a Match it contradicts becomes Suspicious, a downgrade it admits to decides when
+  the fingerprint has no verdict of its own, and a Mismatch stands whatever the server says. An upgrade, a name the
+  catalog does not list, and a failed check are reported next to the verdict and change nothing. The panel shows it
+  in the row and in the report, in English and Chinese; `nerfed served` runs the check alone; Settings and
+  `served_check` switch it off. The access token is used only while its JWT is valid and only against a fixed URL
+  with redirects refused; the refresh token is never read. Thanks to @LamWS for the idea and the first version.
+- `nerfed config set` now stores `served_check` as a boolean; a value typed as `false` used to be kept as a string
+  and read as true.
+
 ## 0.5.1 — 2026-09-18
 
 - The 0.5.0 app crashed at launch on every Mac except the one that built it: the localization looked its resource

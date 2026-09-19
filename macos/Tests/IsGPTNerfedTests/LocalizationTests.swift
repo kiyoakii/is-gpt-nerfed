@@ -137,6 +137,36 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(L10n.backend("future external failure", language: "zh-Hans"), "future external failure")
     }
 
+    func testBackendTranslatesTheServerCheck() {
+        let zh = "zh-Hans"
+        XCTAssertEqual(
+            L10n.backend("🎉 Congrats! You've been nerfed! You asked for gpt-6-astra; the server's own response says gpt-5.6-luna answered. No notice, no refund, no shame.", language: zh),
+            "🎉 恭喜，你被降配了！你选的是 gpt-6-astra，服务器自己的响应却说回答的是 gpt-5.6-luna。没有通知，没有退款，也不必觉得难堪。"
+        )
+        XCTAssertEqual(
+            L10n.backend("Odd: the server's own response says gpt-5.6-luna answered your gpt-6-astra request, while the fingerprint of the answers says gpt-6-astra (97%). Watching.", language: zh),
+            "奇怪：服务器自己的响应说是 gpt-5.6-luna 回答了你选的 gpt-6-astra，但这些回答的指纹结果是 gpt-6-astra（97%）。继续观察。"
+        )
+        XCTAssertEqual(
+            L10n.backend("Hmm. The server's own response says gpt-6-sol answered your gpt-6-astra request, and the fingerprint could not check it. Watching.", language: zh),
+            "服务器自己的响应说是 gpt-6-sol 回答了你选的 gpt-6-astra，指纹这次没能核对。继续观察。"
+        )
+        XCTAssertEqual(L10n.backend("Server · gpt-5.6-luna, asked for gpt-6-astra", language: zh), "服务器 · gpt-5.6-luna，所选为 gpt-6-astra")
+        XCTAssertEqual(L10n.backend("Server · gpt-6-astra, as asked", language: zh), "服务器 · gpt-6-astra，与所选一致")
+        XCTAssertEqual(L10n.backend("Server · astra-x, asked for gpt-6-astra · unknown name, not counted", language: zh),
+                       "服务器 · astra-x，所选为 gpt-6-astra · 名称未知，不计入判定")
+        XCTAssertEqual(L10n.backend("Server · no answer: no valid ChatGPT access token (API-key login, signed out, or expired)", language: zh),
+                       "服务器 · 未回答：没有有效的 ChatGPT 访问令牌（API 密钥登录、已退出或已过期）")
+        XCTAssertEqual(L10n.backend("Server · no answer: HTTP 401: denied", language: zh), "服务器 · 未回答：HTTP 401: denied", "external text stays as it is")
+        XCTAssertEqual(
+            L10n.backend("Last probe · Suspicious · server: gpt-5.6-luna · gpt-6-astra 97% · probe abc", language: zh),
+            "最近一次检测 · 可疑 · 服务器：gpt-5.6-luna · gpt-6-astra 97% · 检测 abc"
+        )
+        XCTAssertEqual(L10n.tr("server: %@", language: zh, arguments: ["gpt-5.6-luna"]), "服务器：gpt-5.6-luna")
+        XCTAssertEqual(L10n.tr("Also ask the server which model answered", language: zh), "同时询问服务器实际用的模型")
+        XCTAssertEqual(L10n.backend("Server · gpt-5.6-luna, asked for gpt-6-astra", language: "fr"), "Server · gpt-5.6-luna, asked for gpt-6-astra")
+    }
+
     func testBackendReportTranslationKeepsUserTitleAndUnknownStrings() {
         let title = "Silent model change: foo"
         let raw = """
