@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.2 — 2026-09-25
+
+- The fingerprint bank now knows gpt-6-sol, gpt-6-luna and claude-opus-5-5 (ModelTrace's 2026-09-23 bank). Sessions
+  on those models get a verdict instead of "Unlisted" (issues #9).
+- The app runs on macOS 15 and newer; it used to require macOS 26. The one Liquid Glass control falls back to a
+  plain capsule on older systems, and the installer says so instead of leaving a bundle macOS refuses to open,
+  pointing at the plugin, which never needed the app (issue #7).
+- A probe no longer fails with "thread metadata lacks model" when Codex reports a session without one: the model,
+  reasoning effort and directory come from the session's own record, and the probe says which of them it had to
+  fill in (issue #8).
+- Hooks are recognised whatever marketplace they were installed from; only the plugin's own name has to match, so
+  a fork or a renamed marketplace no longer reads as "Codex does not list the plugin's hooks" (issue #8).
+- Codex's own complaints about loading the hooks are shown by `nerfed hooks status`, `nerfed doctor` and the panel,
+  instead of being visible only inside Codex's hooks screen. Hooks Codex has switched off are reported as such.
+- The SessionEnd hook asks for 3 seconds instead of 5, which is what Codex allows: it used to clamp the value and
+  report a hook loading problem for it.
+
 ## 0.5.1 — 2026-09-18
 
 - The 0.5.0 app crashed at launch on every Mac except the one that built it: the localization looked its resource
