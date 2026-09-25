@@ -5,6 +5,18 @@
 # browser download of a non-notarized app gets. The archive's sha256 (published next to it) is checked first.
 set -eu
 REPO="kiyoakii/is-gpt-nerfed"
+MIN_MACOS=15
+OS_MAJOR="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+case "$OS_MAJOR" in
+  ''|*[!0-9]*) ;;   # not macOS, or an unreadable version: let the app itself decide
+  *) [ "$OS_MAJOR" -ge "$MIN_MACOS" ] || { cat >&2 <<EOF
+IsGPTNerfed.app needs macOS $MIN_MACOS or newer; this Mac runs $(sw_vers -productVersion).
+The plugin itself has no such requirement and works on its own, without the menu bar app:
+  git clone https://github.com/$REPO ~/is-gpt-nerfed && cd ~/is-gpt-nerfed && ./install.sh
+EOF
+    exit 1; }
+    ;;
+esac
 JSON="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/latest")" \
   || { echo "cannot read the latest release of $REPO (offline, or the repository is not public yet)" >&2; exit 1; }
 pick() { printf '%s' "$JSON" | python3 -c '

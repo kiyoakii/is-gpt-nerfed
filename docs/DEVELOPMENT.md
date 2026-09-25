@@ -6,7 +6,7 @@
 | --- | --- |
 | `plugin/` | the Codex plugin: `.codex-plugin/plugin.json` (manifest + hooks), `skills/is-gpt-nerfed/` (SKILL.md, `scripts/nerfed`, `codex_appserver.py`, `modeltrace_core.py`, `vendor/`), `assets/` (ModelTrace bank + provenance, logo) |
 | `.agents/plugins/marketplace.json` | makes the repository a local Codex marketplace |
-| `macos/` | SwiftUI menu bar app (macOS 26). `build.sh --install` / `--run` / `--zip` / `--dmg` / `--release`; the plugin is copied into the bundle so the app can install itself |
+| `macos/` | SwiftUI menu bar app (macOS 15+, built with the macOS 26 SDK; Liquid Glass where the OS has it). `build.sh --install` / `--run` / `--zip` / `--dmg` / `--release`; the plugin is copied into the bundle so the app can install itself |
 | `bin/nerfed`, `install.sh`, `uninstall.sh` | the CLI wrapper and the plugin-only install |
 | `install-app.sh` | one-line install of the latest release (curl, checksum, no quarantine flag) |
 | `tests/` | unit + offline end-to-end tests with a fake app-server (`fake_codex.py`); `test_parity.py` checks the scorer against ModelTrace's JS core (needs node) |
@@ -17,7 +17,7 @@
 ```bash
 python3 -m unittest discover -s tests -v
 ./bin/nerfed selftest
-./macos/build.sh --install          # Xcode 26
+./macos/build.sh --install          # needs Xcode 26; the bundle runs on macOS 15+
 NERFED_DEMO=1 ~/Applications/IsGPTNerfed.app/Contents/MacOS/IsGPTNerfed --render docs/panel.png   # README images
 ```
 

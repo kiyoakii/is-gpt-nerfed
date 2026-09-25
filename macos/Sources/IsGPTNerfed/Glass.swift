@@ -62,9 +62,14 @@ struct RowButton: View {
             Text(title).font(Type.strong).foregroundStyle(destructive ? Color.red : Color.primary)
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .background(Color.primary.opacity(0.08), in: Capsule())
-        } else {
+        } else if #available(macOS 26, *) {
             Button(action: action) { Text(title).font(Type.strong) }
                 .buttonStyle(.glass)
+                .controlSize(.small)
+                .tint(destructive ? Color.red : nil)
+        } else {  // before Liquid Glass: the same capsule, drawn flat
+            Button(action: action) { Text(title).font(Type.strong) }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(destructive ? Color.red : nil)
         }

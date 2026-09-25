@@ -44,7 +44,7 @@ Codex 会记录每轮对话请求的模型和推理级别。插件会逐轮检�
 
 ## 安装
 
-应用需要 macOS 26。在终端运行下面这条命令，即可安装并打开最新发布版：
+应用需要 macOS 15 或更新版本。在终端运行下面这条命令，即可安装并打开最新发布版：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kiyoakii/is-gpt-nerfed/main/install-app.sh | sh

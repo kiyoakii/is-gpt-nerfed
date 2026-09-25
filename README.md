@@ -51,7 +51,7 @@ not announced.
 
 ## Install
 
-macOS 26. One line in Terminal installs the latest release and opens it:
+macOS 15 or newer. One line in Terminal installs the latest release and opens it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kiyoakii/is-gpt-nerfed/main/install-app.sh | sh
