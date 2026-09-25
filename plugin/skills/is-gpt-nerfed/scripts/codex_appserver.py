@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 
-CLIENT_INFO = {"name": "is-gpt-nerfed", "version": "0.5.1"}
+CLIENT_INFO = {"name": "is-gpt-nerfed", "version": "0.5.2"}
 FINISHED_TURN = ("completed", "interrupted", "failed")
 MESSAGE_ITEMS = ("userMessage", "agentMessage", "reasoning", "hookPrompt")
 
@@ -178,15 +178,29 @@ class AppServer:
 # -- thread helpers -----------------------------------------------------------------------------
 
 
-def read_thread(app: AppServer, thread_id: str) -> dict:
+def read_thread(app: AppServer, thread_id: str, hints: dict | None = None) -> dict:
+    """Metadata for forking. Codex does not always report a model for a session (some builds leave the field out),
+    so `hints` — what the caller's own record of the session says (model, effort, cwd) — fills the gaps. The fields
+    that came from there travel with the thread as `hinted`, so a probe can say where its model came from."""
     thread = (app.request("thread/read", {"threadId": thread_id, "includeTurns": False}, 20) or {}).get("thread") or {}
     if thread.get("id") != thread_id:
         raise AppServerError("codex returned metadata for a different thread")
     if thread.get("ephemeral") or not isinstance(thread.get("path"), str) or not thread["path"]:
         raise AppServerError("session has no persisted history to fork (ephemeral or not saved yet)")
-    for key in ("model", "modelProvider", "cwd"):
-        if not thread.get(key):
-            raise AppServerError(f"thread metadata lacks {key}")
+    thread = dict(thread)
+    hinted = []
+    for key, hint in (("model", (hints or {}).get("model")), ("reasoningEffort", (hints or {}).get("effort")),
+                      ("cwd", (hints or {}).get("cwd"))):
+        if not thread.get(key) and hint:
+            thread[key] = hint
+            hinted.append(key)
+    if thread.get("model") and not thread.get("modelProvider"):
+        thread["modelProvider"] = "openai"  # Codex's own default; only ever missing when it reports no model either
+    if not thread.get("model"):
+        raise AppServerError("neither Codex nor this session's record names a model for it")
+    if not thread.get("cwd"):
+        raise AppServerError("thread metadata lacks cwd")
+    thread["hinted"] = hinted
     return thread
 
 
@@ -381,7 +395,7 @@ def run_turns(app: AppServer, forks: list[dict], deadline: float, parallel: bool
 
 def probe_thread(codex_bin: str, thread_id: str, queries: int = 3, languages=("zh", "en"), timeout_s: float = 180,
                  parallel: bool = True, rng: random.Random | None = None, busy_wait_s: float = 0.0, on_wait=None,
-                 originator: str | None = None) -> dict:
+                 originator: str | None = None, hints: dict | None = None) -> dict:
     """Fork `thread_id` `queries` times (same finished turn), ask each fork for a number sequence, return the answers.
     A thread with a live turn is forked at its previous finished turn; if none is forkable, wait up to `busy_wait_s`."""
     rng = rng or random.Random()
@@ -389,7 +403,7 @@ def probe_thread(codex_bin: str, thread_id: str, queries: int = 3, languages=("z
     app = AppServer(codex_bin, originator=originator)
     try:
         app.initialize()
-        thread = read_thread(app, thread_id)
+        thread = read_thread(app, thread_id, hints)
         turn, first = fork_at_latest_finished_turn(app, thread, on_wait=on_wait, wait_until=t0 + busy_wait_s)
         deadline = time.time() + timeout_s
         forks = [first]
@@ -405,6 +419,7 @@ def probe_thread(codex_bin: str, thread_id: str, queries: int = 3, languages=("z
     return {
         "originator": originator,
         "thread": {"id": thread["id"], "model": thread.get("model"), "provider": thread.get("modelProvider"),
+                   "hinted": thread.get("hinted") or [],
                    "effort": thread.get("reasoningEffort"), "cwd": thread.get("cwd"), "path": thread.get("path"),
                    "originator": thread.get("originator"),
                    "name": thread.get("name"), "last_turn": turn["id"], "last_turn_status": turn.get("status")},
@@ -417,14 +432,33 @@ def probe_thread(codex_bin: str, thread_id: str, queries: int = 3, languages=("z
 # -- hooks (inspection and trust, the same calls the Codex TUI's /hooks screen makes) --------------
 
 
-def list_plugin_hooks(codex_bin: str, plugin_id: str) -> list[dict]:
+def hook_belongs_to(hook: dict, plugin_name: str) -> bool:
+    """Codex names a hook's plugin `<plugin>@<marketplace>`, and the marketplace is whatever the user installed
+    from, so only the plugin part is ours to match. The file a hook came from catches any other shape."""
+    pid = str(hook.get("pluginId") or "")
+    if pid == plugin_name or pid.startswith(plugin_name + "@"):
+        return True
+    return f"/{plugin_name}/" in str(hook.get("sourcePath") or "") or f"/{plugin_name}/scripts/" in str(hook.get("command") or "")
+
+
+def list_plugin_hooks(codex_bin: str, plugin_name: str) -> dict:
+    """{"hooks": [...], "notes": [...]}: the plugin's hooks as Codex lists them, plus what its loader said about the
+    source they came from (that group's `errors` and `warnings`, which Codex's hooks screen shows as loading problems)."""
     app = AppServer(codex_bin, hooks_enabled=True)
     try:
         app.initialize()
         data = (app.request("hooks/list", {}, 30) or {}).get("data") or []
     finally:
         app.close()
-    return [h for group in data for h in (group.get("hooks") or []) if h.get("pluginId") == plugin_id]
+    hooks, notes = [], []
+    for group in data:
+        mine = [h for h in (group.get("hooks") or []) if hook_belongs_to(h, plugin_name)]
+        hooks.extend(mine)
+        for kind in ("errors", "warnings"):
+            for message in group.get(kind) or []:
+                if mine or plugin_name in str(message):  # complaints about our source, not about someone else's
+                    notes.append({"kind": kind[:-1], "message": str(message)[:300]})
+    return {"hooks": hooks, "notes": notes}
 
 
 def trust_hooks(codex_bin: str, hooks: list[dict]) -> dict:

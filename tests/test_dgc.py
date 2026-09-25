@@ -381,6 +381,35 @@ class ForkProbeTests(unittest.TestCase):
         self.assertIn("hooks_trust", out)
         os.remove(dgc.HOOKS_STATUS_PATH)
 
+    def test_a_session_codex_reports_without_a_model_is_probed_from_our_own_record(self):
+        """Some Codex builds return thread metadata with no model; the session's own record fills it in (issue #8)."""
+        row = {"id": "main-thread-14", "model": "gpt-6-astra", "reasoning_effort": "high", "cwd": TMP, "originator": "Codex Desktop"}
+        with mock.patch.object(dgc, "db_thread", return_value=row):
+            rc, out = run_cli(["probe", "now", "--mode", "fork", "--thread", "main-thread-14"],
+                              {"FAKE_CODEX_MODEL": "gpt-6-astra", "FAKE_CODEX_THREAD_NO_MODEL": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("verdict: MATCH", out)
+        rec = dgc.read_json(dgc.probe_path(out.split("probe ")[1].split()[0]))
+        self.assertEqual((rec["expected"], rec["prediction"]), ("gpt-6-astra", "gpt-6-astra"))
+        self.assertEqual(rec["thread"]["hinted"], ["model"], "only the model was missing; effort and cwd came from Codex")
+        self.assertEqual(len(rec["forks"]), 3)
+        events = [e for e in dgc.iter_jsonl(dgc.LOG_PATH) if e.get("kind") == "probe_thread_hinted"]
+        self.assertEqual(events[-1]["fields"], ["model"])
+
+    def test_hooks_are_found_whatever_marketplace_they_came_from(self):
+        """Codex names hooks <plugin>@<marketplace>; a fork or a differently named marketplace is still ours (issue #8)."""
+        env = {"FAKE_CODEX_TRUST_FILE": os.path.join(TMP, "trusted-hooks-elsewhere.json"),
+               "FAKE_CODEX_PLUGIN_ID": "is-gpt-nerfed@someones-own-marketplace",
+               "FAKE_CODEX_HOOK_WARNING": "clamping SessionEnd hook timeout to 3s in /x/.codex-plugin/plugin.json"}
+        rc, out = run_cli(["hooks", "trust"], env)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("5/5 hooks trusted", out)
+        self.assertIn("codex warning: clamping SessionEnd hook timeout", out, "Codex's own loading complaints are shown")
+        snap = json.loads(run_cli(["snapshot", "--json"], env)[1])
+        self.assertEqual(snap["hooks"]["state"], "trusted", "a different marketplace name is not a missing plugin")
+        self.assertEqual(len(snap["hooks"]["notes"]), 1)
+        os.remove(dgc.HOOKS_STATUS_PATH)
+
     def test_unlisted_expected_model(self):
         rc, out = run_cli(["probe", "now", "--mode", "fork", "--thread", "main-thread-4"], {"FAKE_CODEX_MODEL": "gpt-6-astra", "FAKE_CODEX_THREAD_MODEL": "gpt-7-nova"})
         self.assertIn("verdict: UNLISTED", out)

@@ -67,6 +67,7 @@ struct HooksInfo: Codable {
     var trusted: Int?
     var untrusted: Int?
     var state: String?          // trusted | untrusted | missing | unknown
+    var disabled: Int?          // hooks Codex lists but has switched off
     var error: String?
     var lastDesktopEvent: String?
     var lastDesktopEventAgo: String?

@@ -39,7 +39,7 @@ sys.path.insert(0, HERE)
 import codex_appserver as cas  # noqa: E402
 import modeltrace_core as core  # noqa: E402
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 DGC_BIN = os.path.abspath(__file__)
 SKILL_DIR = os.path.dirname(HERE)
 PLUGIN_ROOT = os.environ.get("PLUGIN_ROOT") or os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(os.path.dirname(SKILL_DIR))
@@ -1172,24 +1172,28 @@ def run_fork_probe(thread_id: str, cfg: dict, queries: int | None = None, quiet:
             if st.get("probe_running"):
                 st["probe_running"]["note"] = "waiting for the current turn to finish"
 
-    orig = resolve_originator(cfg, cb, db_thread(thread_id), originator)
+    row = db_thread(thread_id) or {}
+    orig = resolve_originator(cfg, cb, row, originator)
     rec["originator"] = orig
     write_json(probe_path(rec["id"]), rec)
     log_event("probe_originator", probe=rec["id"], sid=thread_id, originator=orig)
+    hints = {"model": row.get("model"), "effort": row.get("reasoning_effort"), "cwd": row.get("cwd")}
 
     def runner(n: int = q):
         return cas.probe_thread(cb, thread_id, queries=n, languages=cfg.get("languages") or ["zh", "en"],
                                 timeout_s=float(cfg.get("probe_timeout_s") or 300), parallel=bool(cfg.get("parallel", True)),
-                                busy_wait_s=float(cfg.get("busy_wait_s") or 600), on_wait=on_wait, originator=orig)
+                                busy_wait_s=float(cfg.get("busy_wait_s") or 600), on_wait=on_wait, originator=orig,
+                                hints=hints)
 
     outputs, errors, out = probe_round(runner, rec)
+    expected = row.get("model")
     if out:
         rec["thread"], rec["forks"], rec["elapsed_s"] = out["thread"], out["forks"], out["elapsed_s"]
-        expected = out["thread"].get("model")
+        expected = out["thread"].get("model") or expected
+        if out["thread"].get("hinted"):
+            log_event("probe_thread_hinted", level="warn", probe=rec["id"], sid=thread_id, fields=out["thread"]["hinted"],
+                      note="codex reported no such field for this session; used the session's own record")
         outputs, errors = top_up_timeouts(rec, outputs, errors, q, runner, sid=thread_id, mode="fork")
-    else:
-        row = db_thread(thread_id)
-        expected = row.get("model") if row else None
     if needs_confirmation(expected, outputs, cfg):  # SUSPICIOUS first round: one more round before the verdict is final
         rec["rounds"] = 2
         log_event("probe_confirm_round", probe=rec["id"], sid=thread_id, reason="first round SUSPICIOUS")
@@ -2463,10 +2467,14 @@ def hooks_status(cfg: dict, max_age_s: float = 900, force: bool = False) -> dict
         cb = codex_bin(cfg)
         if cb:
             try:
-                hooks = cas.list_plugin_hooks(cb, f"{PLUGIN_NAME}@{MARKETPLACE_NAME}")
+                listed = cas.list_plugin_hooks(cb, PLUGIN_NAME)
+                hooks, notes = listed["hooks"], listed["notes"]
                 trusted = sum(1 for h in hooks if h.get("trustStatus") == "trusted")
+                disabled = sum(1 for h in hooks if h.get("enabled") is False)
                 cached = {"checked_ts": now(), "checked": iso(), "total": len(hooks), "trusted": trusted, "untrusted": len(hooks) - trusted,
-                          "hooks": [{"event": h.get("eventName"), "status": h.get("trustStatus"), "key": h.get("key"), "hash": h.get("currentHash")} for h in hooks],
+                          "disabled": disabled, "notes": notes[:6],
+                          "hooks": [{"event": h.get("eventName"), "status": h.get("trustStatus"), "key": h.get("key"),
+                                     "hash": h.get("currentHash"), "enabled": h.get("enabled"), "plugin": h.get("pluginId")} for h in hooks],
                           "error": None}
                 cached["state"] = "missing" if not hooks else ("trusted" if trusted == len(hooks) else "untrusted")
             except Exception as e:
@@ -2483,7 +2491,8 @@ def hooks_status(cfg: dict, max_age_s: float = 900, force: bool = False) -> dict
         rows = db_query(f"SELECT id, originator FROM threads WHERE id IN ({marks})", tuple(sids))
         desk = [sids[r["id"]] for r in rows if (r.get("originator") or "").startswith("Codex Desktop") and sids.get(r["id"])]
         last_desktop = max(desk) if desk else None
-    out = {k: cached.get(k) for k in ("checked", "total", "trusted", "untrusted", "state", "error")}
+    out = {k: cached.get(k) for k in ("checked", "total", "trusted", "untrusted", "disabled", "state", "error")}
+    out["notes"] = cached.get("notes") or []
     out["checked_ago"] = ago(cached.get("checked_ts"))
     out["last_desktop_event"] = last_desktop
     out["last_desktop_event_ago"] = ago(parse_iso(last_desktop)) if last_desktop else None
@@ -2506,7 +2515,7 @@ def cmd_hooks(args) -> int:
     if not cb:
         raise SystemExit("codex binary not found")
     plugin_id = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
-    hooks = cas.list_plugin_hooks(cb, plugin_id)
+    hooks = cas.list_plugin_hooks(cb, PLUGIN_NAME)["hooks"]
     if args.action == "trust":
         pending = [h for h in hooks if h.get("trustStatus") != "trusted"]
         if not pending:
@@ -2515,12 +2524,14 @@ def cmd_hooks(args) -> int:
             r = cas.trust_hooks(cb, pending)
             log_event("hooks_trust", count=len(pending), events=[h.get("eventName") for h in pending], result=(r or {}).get("status"))
             print(f"trusted {len(pending)} hook(s): " + ", ".join(h.get("eventName") or "?" for h in pending))
-            hooks = cas.list_plugin_hooks(cb, plugin_id)
+            hooks = cas.list_plugin_hooks(cb, PLUGIN_NAME)["hooks"]
     st = hooks_status(cfg, force=True)
     print(f"{plugin_id}: {st.get('trusted', 0)}/{st.get('total', 0)} hooks trusted  ·  desktop has fired them: "
           f"{'yes, last ' + st['last_desktop_event_ago'] if st.get('desktop_loaded') else 'not yet (restart the Codex app after installing)'}")
     for h in hooks:
-        print(f"  {h.get('eventName'):18} {h.get('trustStatus'):10} {h.get('currentHash')}")
+        print(f"  {h.get('eventName'):18} {h.get('trustStatus'):10} {'' if h.get('enabled') is not False else 'disabled  '}{h.get('currentHash')}")
+    for note in st.get("notes") or []:
+        print(f"  codex {note['kind']}: {note['message']}")
     if st.get("untrusted"):
         print(f"→ `{DGC_BIN} hooks trust` records trust for the hook definitions above (what /hooks does in the Codex TUI).")
     return 0 if not st.get("untrusted") else 1
@@ -2875,7 +2886,7 @@ def cmd_setup(args) -> int:
     # Hook trust: Codex skips hooks it has not been told to trust (the /hooks screen in the TUI). Offer to record it.
     if cb and not getattr(args, "no_trust", False):
         try:
-            hooks = cas.list_plugin_hooks(cb, f"{PLUGIN_NAME}@{MARKETPLACE_NAME}")
+            hooks = cas.list_plugin_hooks(cb, PLUGIN_NAME)["hooks"]
         except Exception as e:
             hooks = []
             print(f"could not list hooks: {e}")
@@ -2974,6 +2985,11 @@ def cmd_doctor(args) -> int:
         check(False, "Codex does not list this plugin's hooks", "run ./install.sh, then restart the Codex app")
     else:
         print(f"  ⚠️  hook trust unknown ({hs.get('error') or 'not checked yet'})")
+    if hs.get("disabled"):
+        check(False, f"{hs['disabled']} of {hs.get('total')} hooks are switched off in Codex",
+              "turn them back on in Codex's Hooks screen")
+    for note in hs.get("notes") or []:  # what Codex's own hooks screen shows as loading problems
+        print(f"  {'❌' if note['kind'] == 'error' else '⚠️ '} codex {note['kind']}: {note['message']}")
     evs = tail_jsonl(EVENTS_PATH, 1)
     recent = bool(evs) and evs[0].get("ts", "") >= iso(now() - 48 * 3600)
     print(f"  {'✅' if recent else '⚠️ '} hook events seen: {evs[0]['ts'] + ' ' + evs[0]['event'] if evs else 'none yet'}"

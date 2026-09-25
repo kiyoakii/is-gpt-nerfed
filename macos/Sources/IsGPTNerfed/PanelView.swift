@@ -230,6 +230,12 @@ struct PanelView: View {
         case "missing":
             return (L10n.tr("Codex does not list the plugin's hooks · run install.sh"), true)
         default:
+            if h.state != "trusted", let e = h.error, !e.isEmpty {  // the check itself failed: do not blame the install
+                return (L10n.tr("Codex could not list the hooks · run nerfed doctor"), true)
+            }
+            if let off = h.disabled, off > 0 {
+                return (L10n.tr("Hooks switched off in Codex · turn them on in Codex's Hooks screen"), true)
+            }
             if h.desktopLoaded != true {
                 return (L10n.tr("Codex has not loaded the plugin yet · quit and reopen Codex"), true)
             }

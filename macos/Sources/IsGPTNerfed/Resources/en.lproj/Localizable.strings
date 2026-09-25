@@ -79,6 +79,8 @@
 "no hook events yet" = "no hook events yet";
 "Hooks not trusted by Codex · run nerfed hooks trust" = "Hooks not trusted by Codex · run nerfed hooks trust";
 "Codex does not list the plugin's hooks · run install.sh" = "Codex does not list the plugin's hooks · run install.sh";
+"Codex could not list the hooks · run nerfed doctor" = "Codex could not list the hooks · run nerfed doctor";
+"Hooks switched off in Codex · turn them on in Codex's Hooks screen" = "Hooks switched off in Codex · turn them on in Codex's Hooks screen";
 "Codex has not loaded the plugin yet · quit and reopen Codex" = "Codex has not loaded the plugin yet · quit and reopen Codex";
 "Codex still runs the previous version · quit and reopen Codex" = "Codex still runs the previous version · quit and reopen Codex";
 "Codex is not installed on this Mac. Install the Codex app, then reopen this panel." = "Codex is not installed on this Mac. Install the Codex app, then reopen this panel.";

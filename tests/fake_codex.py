@@ -5,6 +5,9 @@ Speaks just enough of the app-server JSON-RPC protocol for is-gpt-nerfed's probe
 controlled by environment variables:
   FAKE_CODEX_MODEL        model label whose reference text is returned (default gpt-6-astra)
   FAKE_CODEX_THREAD_MODEL model reported for the target thread (default = FAKE_CODEX_MODEL)
+  FAKE_CODEX_THREAD_NO_MODEL=1  thread/read reports no model or provider for the thread (some Codex builds do that)
+  FAKE_CODEX_PLUGIN_ID    pluginId hooks/list reports (default is-gpt-nerfed@is-gpt-nerfed)
+  FAKE_CODEX_HOOK_WARNING a hook-loading warning hooks/list reports for that source
   FAKE_CODEX_TOOL=1       the probe "tries a tool" (item/started commandExecution) → must be rejected
   FAKE_CODEX_FAIL=1       the turn ends with status failed
   FAKE_CODEX_APPROVAL=1   the server sends an approval request during the turn
@@ -96,9 +99,12 @@ def main():
             if tid.startswith("ephemeral-") or tid.startswith("side-"):
                 send({"id": rid, "error": {"code": -32000, "message": f"no rollout found for thread {tid}"}})
             else:
-                send({"id": rid, "result": {"thread": {"id": tid, "path": f"/tmp/fake/{tid}.jsonl", "ephemeral": False,
-                                                       "model": thread_model, "modelProvider": "openai", "reasoningEffort": "high",
-                                                       "cwd": "/tmp/fake-project", "name": "fake thread", "originator": "Codex Desktop"}}})
+                meta = {"id": tid, "path": f"/tmp/fake/{tid}.jsonl", "ephemeral": False, "model": thread_model,
+                        "modelProvider": "openai", "reasoningEffort": "high", "cwd": "/tmp/fake-project",
+                        "name": "fake thread", "originator": "Codex Desktop"}
+                if os.environ.get("FAKE_CODEX_THREAD_NO_MODEL"):
+                    meta.pop("model"), meta.pop("modelProvider")
+                send({"id": rid, "result": {"thread": meta}})
         elif method == "thread/turns/list":
             send({"id": rid, "result": {"data": turns(), "nextCursor": None}})
         elif method == "thread/fork":
@@ -161,9 +167,12 @@ def main():
             for i, ev in enumerate(HOOK_EVENTS):
                 h = f"sha256:fake-{ev}"
                 hooks.append({"key": f"is-gpt-nerfed@is-gpt-nerfed:plugin.json#hooks[0]:{ev}:0:0", "eventName": ev, "handlerType": "command",
-                              "command": f"nerfed hook --event {ev}", "pluginId": "is-gpt-nerfed@is-gpt-nerfed", "source": "plugin",
+                              "command": f"nerfed hook --event {ev}", "source": "plugin",
+                              "pluginId": os.environ.get("FAKE_CODEX_PLUGIN_ID", "is-gpt-nerfed@is-gpt-nerfed"),
                               "enabled": True, "currentHash": h, "trustStatus": "trusted" if h in trusted else "untrusted", "displayOrder": i})
-            send({"id": rid, "result": {"data": [{"cwd": "/tmp/fake-project", "hooks": hooks}]}})
+            group = {"cwd": "/tmp/fake-project", "hooks": hooks, "errors": [],
+                     "warnings": [w] if (w := os.environ.get("FAKE_CODEX_HOOK_WARNING")) else []}
+            send({"id": rid, "result": {"data": [group]}})
         elif method == "config/batchWrite" and os.environ.get("FAKE_CODEX_TRUST_FILE"):
             trusted = trusted_hashes()
             for e in params.get("edits") or []:

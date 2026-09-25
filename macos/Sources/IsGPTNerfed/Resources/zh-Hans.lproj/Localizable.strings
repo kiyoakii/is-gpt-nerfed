@@ -79,6 +79,8 @@
 "no hook events yet" = "尚未收到插件回调";
 "Hooks not trusted by Codex · run nerfed hooks trust" = "插件回调尚未获准运行 · 请执行 nerfed hooks trust";
 "Codex does not list the plugin's hooks · run install.sh" = "Codex 中找不到插件回调 · 请运行 install.sh";
+"Codex could not list the hooks · run nerfed doctor" = "Codex 无法列出回调 · 请运行 nerfed doctor";
+"Hooks switched off in Codex · turn them on in Codex's Hooks screen" = "回调在 Codex 中被关闭 · 请在 Codex 的钩子设置中开启";
 "Codex has not loaded the plugin yet · quit and reopen Codex" = "插件尚未加载 · 请重启 Codex";
 "Codex still runs the previous version · quit and reopen Codex" = "插件仍是旧版本 · 请重启 Codex";
 "Codex is not installed on this Mac. Install the Codex app, then reopen this panel." = "这台 Mac 还没安装 Codex。安装后，请重新打开此面板。";

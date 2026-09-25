@@ -1,6 +1,6 @@
 {
   "name": "is-gpt-nerfed",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Transparent, user-controlled detection of silent model downgrades in Codex sessions: a zero-token passive scan of the session rollout on every turn, plus ModelTrace fingerprint probes run in ephemeral forks of the thread (the mechanism behind /side) on a schedule you choose. Verdicts are delivered as a snarky card.",
   "author": {
     "name": "is-gpt-nerfed contributors"
@@ -73,7 +73,7 @@
             {
               "type": "command",
               "command": "sh -c 'command -v python3 >/dev/null 2>&1 || exit 0; P=\"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}\"; S=\"$P/skills/is-gpt-nerfed/scripts/nerfed\"; [ -f \"$S\" ] || S=\"$HOME/.codex/is-gpt-nerfed/plugin/skills/is-gpt-nerfed/scripts/nerfed\"; [ -f \"$S\" ] || exit 0; exec python3 \"$S\" hook --event SessionEnd'",
-              "timeout": 5
+              "timeout": 3
             }
           ]
         }
