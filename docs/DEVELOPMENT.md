@@ -55,6 +55,11 @@ configuration keys and URLs stay unchanged in translations.
   `[hooks.state."<hook key>"]` in `~/.codex/config.toml`, written through the app-server's `config/batchWrite`, the same
   call the Codex TUI's `/hooks` screen makes (`nerfed hooks status` / `nerfed hooks trust`). The hash covers the hook
   command, so changing a command needs re-trusting; `install.sh` does that.
+- On Windows Codex runs a hook's command through the platform shell, which is not POSIX, so the bundled
+  `sh -c '…'` form loses its single quotes and dies with a syntax error. `nerfed setup` rewrites every hook command in
+  the manifest into a bare `<python> <plugin>/skills/is-gpt-nerfed/scripts/nerfed hook --event X` with absolute paths,
+  a form both cmd and PowerShell accept. That changes the command, so the hooks need re-trusting, and `setup` does it.
+  The rewritten manifest is install-time state; keep the checked-in manifest POSIX.
 - A non-zero exit from a hook (argparse's exit 2 included) makes Codex block the user's turn. The hook entry point
   therefore never exits non-zero, and the shell wrapper exits 0 when `python3` or the script is missing. A hook that
   crashes is recorded in `~/.codex/is-gpt-nerfed/errors.log` and nowhere else.
@@ -180,8 +185,9 @@ browser download needs System Settings → Privacy & Security → Open Anyway. W
 
 ## Limits and contributions
 
-Windows and Linux are untested. The Python is portable, but notifications and the app are macOS-only. Codex's
+Windows is tested and works (the whole offline suite runs there); Linux is untested. Notifications, the menu bar
+app and the self-updater stay macOS-only. Codex's
 app-server protocol is marked experimental; `nerfed doctor --fork` checks the fork path against the installed Codex
 without running inference. Contributions that would help most: new detection signals, bank updates from upstream
-ModelTrace (keep `provenance.json` accurate), and Windows or Linux support. Keep the panel to its type scale (17 / 13 /
+ModelTrace (keep `provenance.json` accurate), and Linux support. Keep the panel to its type scale (17 / 13 /
 11) and without icons.

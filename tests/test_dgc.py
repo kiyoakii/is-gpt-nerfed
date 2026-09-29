@@ -22,7 +22,8 @@ for var in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX_NETWORK_DISABL
     os.environ.pop(var, None)
 
 DGC_PATH = os.path.join(ROOT, "plugin", "skills", "is-gpt-nerfed", "scripts", "nerfed")
-FAKE_CODEX = os.path.join(ROOT, "tests", "fake_codex.py")
+# Windows cannot exec a shebang script, so there the tests launch the fake through a .cmd wrapper.
+FAKE_CODEX = os.path.join(ROOT, "tests", "fake_codex.cmd" if os.name == "nt" else "fake_codex.py")
 loader = importlib.machinery.SourceFileLoader("dgc", DGC_PATH)
 spec = importlib.util.spec_from_loader("dgc", loader)
 dgc = importlib.util.module_from_spec(spec)

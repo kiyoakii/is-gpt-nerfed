@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
 import glob
 import json
 import os
@@ -33,6 +32,11 @@ import subprocess
 import sys
 import time
 import uuid
+
+if os.name == "nt":  # a cp936 console cannot encode the verdict glyphs, and neither can a redirected pipe
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -704,19 +708,48 @@ def save_session(st: dict) -> None:
     write_json(session_path(st["sid"]), st)
 
 
+def acquire_lock(fh) -> None:
+    """Exclusive lock on a lock file: fcntl on POSIX, a byte-range lock on Windows."""
+    if os.name == "nt":
+        import msvcrt
+        fh.seek(0)
+        for _ in range(100):  # hooks run under a 5-20 s timeout; never block indefinitely
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+        return
+    import fcntl
+    fcntl.flock(fh, fcntl.LOCK_EX)
+
+
+def release_lock(fh) -> None:
+    if os.name == "nt":
+        import msvcrt
+        try:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        return
+    import fcntl
+    fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 @contextlib.contextmanager
 def locked_session(sid: str):
     """Load-modify-save under an exclusive file lock (hooks and background workers touch the same file)."""
     ensure_dirs()
     lock_path = session_path(sid) + ".lock"
     with open(lock_path, "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        acquire_lock(lock)
         try:
             st = load_session(sid)
             yield st
             save_session(st)
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            release_lock(lock)
 
 
 def all_sessions() -> list[dict]:
@@ -2861,9 +2894,41 @@ def manifest_paths() -> list[str]:
     return [p for p in (os.path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), os.path.join(PLUGIN_ROOT, "plugin.json")) if os.path.exists(p)]
 
 
+def hook_commands_look_posix(manifest_text: str) -> bool:
+    """The bundled hook commands are `sh -c '…'`, which only survives a POSIX shell's quoting."""
+    return "${PLUGIN_ROOT" in manifest_text and "exit 0" in manifest_text
+
+
+def windowsify_hook_commands() -> list[str]:
+    """Codex runs a hook's command string through the platform shell, and on Windows the POSIX quoting in the
+    bundled manifest is destroyed before it reaches sh (the single quotes are consumed, the command then dies with
+    a syntax error). Rewrite every hook command into a direct interpreter invocation with absolute paths, which no
+    shell needs to quote. Returns the manifests that were rewritten."""
+    script, py = os.path.join(HERE, "nerfed"), sys.executable
+    # PowerShell rejects a quoted token as the command itself ("&" is needed), and cmd rejects "&", so go bare
+    # whenever the paths allow it.
+    call = f'& "{py}" "{script}"' if " " in py or " " in script else f"{py} {script}"
+    touched = []
+    for p in manifest_paths():
+        manifest = read_json(p) or {}
+        groups = (manifest.get("hooks") or {}).get("hooks") or {}
+        if not groups:
+            continue
+        for event, entries in groups.items():
+            for entry in entries or []:
+                for hook in entry.get("hooks") or []:
+                    if hook.get("type") == "command":
+                        hook["command"] = f"{call} hook --event {event}"
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        touched.append(p)
+    return touched
+
+
 def run(cmd: list[str], timeout: int = 120) -> tuple[int, str]:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return r.returncode, (r.stdout + r.stderr).strip()
     except Exception as e:
         return 1, str(e)
@@ -2886,6 +2951,9 @@ def cmd_setup(args) -> int:
     ensure_dirs()
     root = os.path.dirname(PLUGIN_ROOT)
     print(f"plugin root: {PLUGIN_ROOT}")
+    if os.name == "nt":
+        for p in windowsify_hook_commands():
+            print(f"  rewrote {os.path.relpath(p, PLUGIN_ROOT)} hook commands for the Windows shell")
     write_bin_hint()
     cb = codex_bin(cfg)
     ok_cli = False
@@ -2916,13 +2984,18 @@ def cmd_setup(args) -> int:
             # Fallback the hook command uses when PLUGIN_ROOT is stale. It points at the marketplace source (the
             # checkout or the app bundle), which survives version bumps; Codex deletes old cache directories.
             stable = os.path.join(NERFED_HOME, "plugin")
-            source = current if "/plugins/cache/" in PLUGIN_ROOT else PLUGIN_ROOT
+            source = current if os.sep + "plugins" + os.sep + "cache" + os.sep in PLUGIN_ROOT else PLUGIN_ROOT
             try:
                 if os.path.islink(stable) or os.path.exists(stable):
                     os.remove(stable) if os.path.islink(stable) else shutil.rmtree(stable)
                 os.symlink(source, stable)
             except OSError as e:
-                print(f"  could not update {stable}: {e}")
+                # Symlinks need developer mode or elevation on Windows; a plain copy serves the same purpose.
+                try:
+                    shutil.copytree(source, stable, ignore=shutil.ignore_patterns("__pycache__"))
+                    print(f"  copied the plugin to {stable} (symlink unavailable: {e})")
+                except OSError as copy_error:
+                    print(f"  could not update {stable}: {copy_error}")
     if not ok_cli:
         print("falling back to manual registration in ~/.codex/config.toml")
         text = config_toml_text()
@@ -3031,8 +3104,13 @@ def cmd_doctor(args) -> int:
         hooks = m.get("hooks") or ((m.get("extensions") or {}).get("com.openai") or {}).get("hooks")
         text = json.dumps(hooks) if hooks else ""
         check(bool(hooks), f"hooks declared in {os.path.relpath(p, PLUGIN_ROOT)}")
-        check("${PLUGIN_ROOT" in text and "exit 0" in text,
-              "hook commands locate the plugin through ${PLUGIN_ROOT} and never block when the file is missing")
+        posix = hook_commands_look_posix(text)
+        slash = lambda s: re.sub(r"[\\/]+", "/", s).lower()  # json.dumps doubles the backslashes of Windows paths
+        absolute = slash(os.path.join(HERE, "nerfed")) in slash(text)
+        form = "${PLUGIN_ROOT}, never blocking when the file is missing" if posix else \
+            "absolute paths (the Windows form)" if absolute else "neither ${PLUGIN_ROOT} nor an absolute path"
+        check(posix or absolute, f"hook commands locate the plugin through {form}",
+              "run nerfed setup, which rewrites them for this platform")
     stable = os.path.join(NERFED_HOME, "plugin")
     check(os.path.exists(os.path.join(stable, "skills", "is-gpt-nerfed", "scripts", "nerfed")) if os.path.exists(CONFIG_PATH) else True,
           f"fallback plugin path {stable} → {os.path.realpath(stable) if os.path.exists(stable) else 'missing'}", "run ./install.sh")

@@ -64,8 +64,11 @@ class AppServer:
         args = [codex_bin, "app-server", "--stdio", "-c", "notify=[]"]
         if not hooks_enabled:
             args += ["-c", "features.hooks=false"]
+        # The app-server speaks UTF-8 JSON; text=True would decode the pipes with the locale codec and die on any
+        # byte outside it (cp936 on a Chinese Windows).
         self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, env=environ, text=True, bufsize=1)
+                                     stderr=subprocess.DEVNULL, env=environ, text=True, bufsize=1,
+                                     encoding="utf-8", errors="replace")
         self._write_lock = threading.Lock()
         self._cond = threading.Condition()
         self._next_id = 0
